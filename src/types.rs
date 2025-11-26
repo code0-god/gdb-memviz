@@ -82,6 +82,8 @@ fn parse_array_line(text: &str, word_size: usize) -> Option<TypeLayout> {
 }
 
 fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
+    // Very small parser: assumes flat "type name;" lines inside the struct and estimates size
+    // by accumulating base sizes (no padding handling).
     let mut lines = text.lines();
     let header = lines.find(|l| l.contains("type = struct"))?;
     let name = Regex::new(r"type\s*=\s*struct\s+([A-Za-z0-9_]+)")
@@ -143,6 +145,7 @@ fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
 }
 
 fn base_type_size(type_name: &str, word_size: usize) -> usize {
+    // Crude size guesser for simple C types; pointer width falls back to detected word size.
     let t = type_name.trim();
     if t.ends_with('*') {
         return word_size.max(1);
@@ -161,6 +164,7 @@ fn base_type_size(type_name: &str, word_size: usize) -> usize {
 
 /// Normalize type string for display (e.g., "int [5]" -> "int[5]").
 pub fn normalize_type_name(s: &str) -> String {
+    // Remove spaces before array brackets to make output more compact/readable.
     let trimmed = s.trim();
     let mut out = String::with_capacity(trimmed.len());
     let mut chars = trimmed.chars().peekable();

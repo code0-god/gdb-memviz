@@ -71,7 +71,7 @@ pub struct MiSession {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    verbose: bool,
+    verbose: bool, // when true, echo MI traffic to stderr for debugging
     pub word_size: usize,
     word_known: bool,
     pub endian: Endian,
@@ -80,6 +80,7 @@ pub struct MiSession {
 
 impl MiSession {
     pub fn start(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<Self> {
+        // Spawn gdb in MI mode (`-i=mi`) with quiet banner. Target args are passed as-is.
         let mut cmd = Command::new(gdb_bin);
         cmd.arg("-q").arg("-i=mi").arg("--args").arg(target);
         for a in args {
@@ -140,6 +141,7 @@ impl MiSession {
 
     /// Insert breakpoint at main, run, and wait until it stops.
     pub fn run_to_main(&mut self) -> Result<()> {
+        // Best-effort: set a breakpoint on main, run, and block until a stop event arrives.
         let resp = self.exec_command("-break-insert main")?;
         match resp.status {
             MiStatus::Error(msg) => {
@@ -206,6 +208,7 @@ impl MiSession {
 
     /// Run ptype and return console text.
     pub fn ptype_text(&mut self, symbol: &str) -> Result<String> {
+        // We call into the CLI `ptype` because MI lacks a clean equivalent for pretty layout.
         let cmd = format!("-interpreter-exec console \"ptype {}\"", symbol);
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
@@ -268,6 +271,7 @@ impl MiSession {
                 self.word_known = true;
             }
             _ => {
+                // If gdb cannot answer, assume 64-bit to keep dumps aligned.
                 if self.verbose {
                     eprintln!("[warn] failed to detect word size; defaulting to 8");
                 }
@@ -296,7 +300,7 @@ impl MiSession {
             eprintln!("[warn] failed to detect endian; leaving Unknown");
         }
 
-        // Try to guess from arch if already known.
+        // Try to guess from arch if already known; otherwise default to little.
         if let Some(arch) = &self.arch {
             if let Some(guessed) = guess_endian_from_arch(arch) {
                 self.endian = guessed;
@@ -322,6 +326,7 @@ impl MiSession {
         if requested == 0 {
             requested = 32;
         }
+        // Cap dump size to avoid overwhelming output/logs.
         let mut truncated_from = None;
         if requested > MAX_DUMP_BYTES {
             truncated_from = Some(requested);
@@ -511,6 +516,7 @@ impl MiSession {
     }
 
     fn read_response(&mut self) -> Result<MiResponse> {
+        // Collect a single result record (^done/^error/...) and any preceding async output.
         let mut oob = Vec::new();
         let mut result_line: Option<String> = None;
         let mut saw_prompt = false;
@@ -555,6 +561,8 @@ impl MiSession {
     }
 
     fn read_until_prompt(&mut self, require_result: bool) -> Result<Vec<String>> {
+        // Helper for initial banner drain; returns all lines until a prompt, optionally
+        // insisting that we saw a result record before exiting.
         let mut lines = Vec::new();
         let mut saw_result = false;
         loop {
@@ -602,6 +610,7 @@ fn parse_msg_field(s: &str) -> Option<String> {
 }
 
 fn parse_value_field(s: &str) -> Option<String> {
+    // Handles escaped quotes/newlines in MI `value="..."`.
     Regex::new(r#"value="((?:\\.|[^"])*)""#)
         .ok()
         .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
@@ -665,6 +674,7 @@ fn split_hex_bytes(s: &str) -> Vec<u8> {
 }
 
 fn parse_locals(s: &str) -> Vec<LocalVar> {
+    // MI locals come as a nested record; we use a permissive regex to avoid brittle parsing.
     let mut locals = Vec::new();
     if let Ok(re) = Regex::new(
         r#"\{[^}]*name="(?P<name>[^"]+)"[^}]*?(?:type="(?P<type>(?:\\.|[^"])*)")?[^}]*?(?:value="(?P<value>(?:\\.|[^"])*)")?[^}]*\}"#,
@@ -706,6 +716,7 @@ fn parse_usize(s: &str) -> std::result::Result<usize, String> {
 }
 
 fn bytes_to_u64(bytes: &[u8], endian: Endian) -> u64 {
+    // Interpret up to 8 bytes from gdb in the current endianness, padding as needed.
     let mut buf = [0u8; 8];
     let len = bytes.len().min(8);
     if matches!(endian, Endian::Big) {
@@ -790,6 +801,7 @@ fn unescape_value(raw: &str) -> String {
 }
 
 fn mi_escape(expr: &str) -> String {
+    // Wrap an expression in MI-friendly quotes, escaping characters gdb/MI would treat specially.
     let mut out = String::with_capacity(expr.len() + 2);
     out.push('"');
     for ch in expr.chars() {

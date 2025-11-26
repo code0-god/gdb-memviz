@@ -4,6 +4,8 @@ use regex::Regex;
 use std::io::{self, Write};
 
 pub fn repl(session: &mut MiSession) -> Result<()> {
+    // Tiny read-eval-print loop: parse first token as command, rest as args, keep running
+    // until EOF or quit.
     println!("Commands: locals | mem <expr> [len] | view <symbol> | follow <symbol> [depth] | break <loc> | next | step | continue | help | quit");
     let stdin = io::stdin();
     let mut line = String::new();
@@ -37,6 +39,7 @@ pub fn repl(session: &mut MiSession) -> Result<()> {
                 let mut rest_parts = rest.split_whitespace();
                 let expr = rest_parts.next().unwrap_or("");
                 let len_opt = rest_parts.next().map(|s| s.parse::<usize>());
+                // Optional length override; otherwise sizeof(expr) is used inside memory_dump.
                 let override_len = match len_opt {
                     Some(Ok(v)) => Some(v),
                     Some(Err(_)) => {
@@ -97,12 +100,8 @@ fn print_help() {
     println!("Commands:");
     println!("  locals            - list locals in current frame");
     println!("  mem <expr> [len]  - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
-    println!(
-        "  view <symbol>     - show type-based layout for symbol (struct/array) plus raw dump"
-    );
-    println!(
-        "  follow <sym> [d]  - follow pointer chain for symbol up to optional depth (default ~8)"
-    );
+    println!("  view <symbol>     - show type-based layout for symbol (struct/array) plus raw dump");
+    println!("  follow <sym> [d]  - follow pointer chain for symbol up to optional depth (default ~8)");
     println!("  break <loc> | b   - set breakpoint (e.g. 'break main', 'b file.c:42')");
     println!("  next | n          - execute next line (step over)");
     println!("  step | s          - step into functions");
@@ -126,6 +125,7 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
             return Ok(());
         }
     };
+    // Try to get struct/array layout; fall back to scalar with known size.
     let layout = session
         .fetch_layout(symbol, size)
         .unwrap_or(TypeLayout::Scalar {
@@ -191,6 +191,8 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
 }
 
 fn handle_follow(args: &str, session: &mut MiSession) -> Result<()> {
+    // Minimal pointer-chain walker: validates the symbol, figures out pointee layout,
+    // then repeatedly evaluates the struct value and reads the chosen link field.
     let mut parts = args.split_whitespace();
     let symbol = match parts.next() {
         Some(s) if !s.is_empty() => s,
@@ -249,6 +251,8 @@ fn handle_follow(args: &str, session: &mut MiSession) -> Result<()> {
     if value_text.is_none() {
         value_text = session.evaluate_expression(symbol).ok();
     }
+    // Parse the pointer address from gdb's string representation. If it doesn't parse,
+    // try re-evaluating to get a simpler form.
     let raw_value = match value_text {
         Some(v) => v,
         None => {
@@ -298,6 +302,7 @@ fn handle_follow(args: &str, session: &mut MiSession) -> Result<()> {
         TypeLayout::Struct { name, .. } => name.clone(),
         _ => pointee_type.clone(),
     };
+    // Pick link field: prefer "next", otherwise the first pointer field we see.
     let link_field = match find_pointer_field(&layout).cloned() {
         Some(f) => f,
         None => {
@@ -326,6 +331,7 @@ fn handle_follow(args: &str, session: &mut MiSession) -> Result<()> {
             Ok(val) => println!("    -> {} {}", pointee_type, prettify_value(&val)),
             Err(e) => println!("    -> <eval error: {}>", e),
         }
+        // Read the link field directly from memory to avoid parsing the evaluated struct.
         let field_addr = match addr.checked_add(link_field.offset as u64) {
             Some(v) => v,
             None => {
@@ -454,6 +460,7 @@ fn print_stopped(loc: &StoppedLocation) {
 }
 
 fn ascii_repr(bytes: &[u8]) -> String {
+    // Printable ASCII range is shown verbatim; everything else becomes '.'.
     bytes
         .iter()
         .map(|b| {
@@ -481,6 +488,7 @@ fn prettify_value(s: &str) -> String {
             }
         }
     }
+    // Also collapse contiguous raw \0 or \000 sequences (as emitted in array prints).
     if let Ok(re) = Regex::new(r"(\\0{1,3}){2,}") {
         if let Ok(single) = Regex::new(r"\\0{1,3}") {
             let replaced = re
@@ -499,6 +507,7 @@ fn prettify_value(s: &str) -> String {
 }
 
 fn parse_pointer_address(value: &str) -> Option<u64> {
+    // Try hex form first; fall back to decimal if hex is absent.
     if let Ok(re) = Regex::new(r"0x[0-9a-fA-F]+") {
         if let Some(mat) = re.find(value) {
             let trimmed = mat.as_str().trim_start_matches("0x");
@@ -525,6 +534,7 @@ fn strip_pointer_type(ty: &str) -> String {
 }
 
 fn normalize_pointer_type(ty: &str) -> String {
+    // Collapse spaces for display: "struct Node *" -> "struct Node*"
     normalize_type_name(ty).replace(" *", "*")
 }
 

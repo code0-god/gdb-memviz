@@ -1,3 +1,4 @@
+// Entry point wires CLI parsing to the MI session and REPL.
 mod interactive;
 mod mi;
 mod types;
@@ -5,11 +6,14 @@ mod types;
 use mi::{MiResponse, MiSession, Result};
 
 fn main() -> Result<()> {
+    // Parse CLI: allow --gdb override, verbose MI logging, and forward the remaining args
+    // to the target binary. Exits with usage on missing target.
     let mut gdb_bin = std::env::var("GDB").unwrap_or_else(|_| "gdb".to_string());
     let mut verbose = false;
     let mut target: Option<String> = None;
     let mut target_args: Vec<String> = Vec::new();
 
+    // Simple flag parser: stops at first non-flag and treats the rest as program+args.
     let mut iter = std::env::args().skip(1).peekable();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -48,6 +52,7 @@ fn main() -> Result<()> {
         "[gdb-memviz] gdb: {} | target: {} {:?} | verbose: {}",
         gdb_bin, target, target_args, verbose
     );
+    // Launch gdb/MI and do one-time probing before entering the REPL.
     let mut session = MiSession::start(&gdb_bin, &target, &target_args, verbose)?;
     session.drain_initial_output()?;
 
@@ -67,6 +72,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Helper to echo MI responses when verbose is enabled.
 fn describe_response(label: &str, resp: &MiResponse, verbose: bool) {
     if !verbose {
         return;
