@@ -1,4 +1,5 @@
 mod interactive;
+mod types;
 mod mi;
 
 use mi::{MiResponse, MiSession, Result};

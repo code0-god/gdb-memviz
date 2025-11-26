@@ -1,4 +1,5 @@
 use regex::Regex;
+use crate::types::{TypeLayout, parse_ptype_output};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -200,6 +201,38 @@ impl MiSession {
             return Err(format!("{}", msg).into());
         }
         parse_value_field(&resp.result).ok_or_else(|| "value not found in MI response".into())
+    }
+
+    /// Run ptype and return console text.
+    pub fn ptype_text(&mut self, symbol: &str) -> Result<String> {
+        let cmd = format!("-interpreter-exec console \"ptype {}\"", symbol);
+        let resp = self.exec_command(&cmd)?;
+        if let MiStatus::Error(msg) = resp.status.clone() {
+            return Err(format!("{}", msg).into());
+        }
+        let mut out = String::new();
+        for line in &resp.oob {
+            if let Some(stripped) = line.strip_prefix("~\"") {
+                let mut s = stripped.trim_end_matches('"').to_string();
+                s = s.replace("\\n", "\n");
+                out.push_str(&s);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push_str(&resp.result);
+        }
+        Ok(out)
+    }
+
+    /// Fetch a parsed type layout using ptype; fall back to scalar.
+    pub fn fetch_layout(&mut self, symbol: &str, size: usize) -> Option<TypeLayout> {
+        if let Ok(txt) = self.ptype_text(symbol) {
+            return Some(parse_ptype_output(&txt, self.word_size, size));
+        }
+        None
     }
 
     /// Evaluate sizeof(<expr>) and return bytes.
