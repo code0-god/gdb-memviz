@@ -1,10 +1,10 @@
 use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, MiSession, Result, StoppedLocation};
-use crate::types::{TypeLayout, normalize_type_name};
+use crate::types::{find_pointer_field, is_pointer_type, normalize_type_name, TypeLayout};
 use regex::Regex;
 use std::io::{self, Write};
 
 pub fn repl(session: &mut MiSession) -> Result<()> {
-    println!("Commands: locals | mem <expr> [len] | view <symbol> | break <loc> | next | step | continue | help | quit");
+    println!("Commands: locals | mem <expr> [len] | view <symbol> | follow <symbol> [depth] | break <loc> | next | step | continue | help | quit");
     let stdin = io::stdin();
     let mut line = String::new();
     loop {
@@ -58,6 +58,13 @@ pub fn repl(session: &mut MiSession) -> Result<()> {
                 let symbol = rest.split_whitespace().next().unwrap_or("");
                 handle_view(symbol, session)?;
             }
+            "follow" => {
+                if rest.is_empty() {
+                    println!("usage: follow <symbol> [depth]");
+                    continue;
+                }
+                handle_follow(rest, session)?;
+            }
             "break" | "b" => {
                 if rest.is_empty() {
                     println!("usage: break <location>");
@@ -90,7 +97,12 @@ fn print_help() {
     println!("Commands:");
     println!("  locals            - list locals in current frame");
     println!("  mem <expr> [len]  - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
-    println!("  view <symbol>     - show type-based layout for symbol (struct/array) plus raw dump");
+    println!(
+        "  view <symbol>     - show type-based layout for symbol (struct/array) plus raw dump"
+    );
+    println!(
+        "  follow <sym> [d]  - follow pointer chain for symbol up to optional depth (default ~8)"
+    );
     println!("  break <loc> | b   - set breakpoint (e.g. 'break main', 'b file.c:42')");
     println!("  next | n          - execute next line (step over)");
     println!("  step | s          - step into functions");
@@ -114,11 +126,18 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
             return Ok(());
         }
     };
-    let layout = session.fetch_layout(symbol, size).unwrap_or(TypeLayout::Scalar {
-        type_name: "unknown".to_string(),
-        size,
-    });
-    println!("symbol: {} ({}) @ {}", symbol, normalize_type_name(&type_name(&layout)), addr);
+    let layout = session
+        .fetch_layout(symbol, size)
+        .unwrap_or(TypeLayout::Scalar {
+            type_name: "unknown".to_string(),
+            size,
+        });
+    println!(
+        "symbol: {} ({}) @ {}",
+        symbol,
+        normalize_type_name(&type_name(&layout)),
+        addr
+    );
     println!("size: {} bytes (word size = {})", size, session.word_size);
     let endian_str = match session.endian {
         Endian::Little => "little-endian",
@@ -128,7 +147,9 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
     let arch_str = session.arch.as_deref().unwrap_or("unknown");
     println!("layout: {} (arch={})", endian_str, arch_str);
     match &layout {
-        TypeLayout::Struct { fields, name: _, .. } => {
+        TypeLayout::Struct {
+            fields, name: _, ..
+        } => {
             println!("\nfields:");
             println!("  offset    size  field");
             for f in fields {
@@ -166,6 +187,165 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
     println!("\nraw:");
     let dump = session.memory_dump(symbol, Some(size))?;
     print_memory_body(&dump);
+    Ok(())
+}
+
+fn handle_follow(args: &str, session: &mut MiSession) -> Result<()> {
+    let mut parts = args.split_whitespace();
+    let symbol = match parts.next() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            println!("usage: follow <symbol> [depth]");
+            return Ok(());
+        }
+    };
+    let depth = match parts.next() {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(v) if v > 0 => v,
+            Ok(_) => {
+                println!("follow: depth must be positive");
+                return Ok(());
+            }
+            Err(_) => {
+                println!("follow: invalid depth '{}'", raw);
+                return Ok(());
+            }
+        },
+        None => 8,
+    };
+    let locals = match session.list_locals() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("follow: failed to list locals: {}", e);
+            return Ok(());
+        }
+    };
+    let var = match locals.iter().find(|v| v.name == symbol) {
+        Some(v) => v,
+        None => {
+            println!("follow: symbol '{}' not found in locals", symbol);
+            return Ok(());
+        }
+    };
+    let ty = match &var.ty {
+        Some(t) => t.trim(),
+        None => {
+            println!("follow: type for '{}' unavailable", symbol);
+            return Ok(());
+        }
+    };
+    if !is_pointer_type(ty) {
+        println!("follow: '{}' is not a pointer type (got '{}')", symbol, ty);
+        return Ok(());
+    }
+    let pointee_type = strip_pointer_type(ty);
+    if pointee_type.is_empty() {
+        println!("follow: cannot obtain layout for pointee type '{}'", ty);
+        return Ok(());
+    }
+    let ptr_display = normalize_pointer_type(ty);
+
+    let mut value_text = var.value.clone();
+    if value_text.is_none() {
+        value_text = session.evaluate_expression(symbol).ok();
+    }
+    let raw_value = match value_text {
+        Some(v) => v,
+        None => {
+            println!("follow: value for '{}' unavailable", symbol);
+            return Ok(());
+        }
+    };
+    let mut addr_opt = parse_pointer_address(&raw_value);
+    if addr_opt.is_none() {
+        if let Ok(eval) = session.evaluate_expression(symbol) {
+            addr_opt = parse_pointer_address(&eval);
+        }
+    }
+    let mut addr = match addr_opt {
+        Some(a) => a,
+        None => {
+            println!(
+                "follow: could not parse pointer value for '{}' (value '{}')",
+                symbol, raw_value
+            );
+            return Ok(());
+        }
+    };
+    if addr == 0 {
+        println!("follow: '{}' is NULL", symbol);
+        return Ok(());
+    }
+
+    let layout = match session.fetch_layout_for_type(&pointee_type) {
+        Some(l @ TypeLayout::Struct { .. }) => l,
+        Some(_) => {
+            println!(
+                "follow: cannot obtain layout for pointee type '{}'",
+                pointee_type
+            );
+            return Ok(());
+        }
+        None => {
+            println!(
+                "follow: cannot obtain layout for pointee type '{}'",
+                pointee_type
+            );
+            return Ok(());
+        }
+    };
+    let struct_name = match &layout {
+        TypeLayout::Struct { name, .. } => name.clone(),
+        _ => pointee_type.clone(),
+    };
+    let link_field = match find_pointer_field(&layout).cloned() {
+        Some(f) => f,
+        None => {
+            println!(
+                "follow: struct {} has no pointer field to follow (expected e.g. 'next')",
+                struct_name
+            );
+            return Ok(());
+        }
+    };
+
+    let mut expr_display = symbol.to_string();
+    for i in 0..depth {
+        println!(
+            "[{}] {} ({}) = {}",
+            i,
+            expr_display,
+            ptr_display,
+            format_addr(addr)
+        );
+        if addr == 0 {
+            println!("    -> NULL (stopped)");
+            break;
+        }
+        match session.evaluate_expression(&format!("* ({} *) (0x{:x})", pointee_type, addr)) {
+            Ok(val) => println!("    -> {} {}", pointee_type, prettify_value(&val)),
+            Err(e) => println!("    -> <eval error: {}>", e),
+        }
+        let field_addr = match addr.checked_add(link_field.offset as u64) {
+            Some(v) => v,
+            None => {
+                println!("    -> overflow computing address for {}", link_field.name);
+                break;
+            }
+        };
+        let next_addr = match session.read_pointer_at(field_addr, Some(link_field.size)) {
+            Ok(v) => v,
+            Err(e) => {
+                println!(
+                    "    -> failed to read {}.{}: {}",
+                    struct_name, link_field.name, e
+                );
+                break;
+            }
+        };
+        expr_display = format!("{}->{}", expr_display, link_field.name);
+        addr = next_addr;
+    }
     Ok(())
 }
 
@@ -301,5 +481,53 @@ fn prettify_value(s: &str) -> String {
             }
         }
     }
+    if let Ok(re) = Regex::new(r"(\\0{1,3}){2,}") {
+        if let Ok(single) = Regex::new(r"\\0{1,3}") {
+            let replaced = re
+                .replace_all(s, |caps: &regex::Captures| {
+                    let matched = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+                    let count = single.find_iter(matched).count().max(1);
+                    format!("\\0 (x{})", count)
+                })
+                .to_string();
+            if replaced != s {
+                return replaced;
+            }
+        }
+    }
     s.to_string()
+}
+
+fn parse_pointer_address(value: &str) -> Option<u64> {
+    if let Ok(re) = Regex::new(r"0x[0-9a-fA-F]+") {
+        if let Some(mat) = re.find(value) {
+            let trimmed = mat.as_str().trim_start_matches("0x");
+            if let Ok(v) = u64::from_str_radix(trimmed, 16) {
+                return Some(v);
+            }
+        }
+    }
+    let trimmed = value.trim();
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(v) = trimmed.parse::<u64>() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn strip_pointer_type(ty: &str) -> String {
+    let mut trimmed = ty.trim().to_string();
+    while trimmed.ends_with('*') {
+        trimmed.pop();
+    }
+    trimmed.trim().to_string()
+}
+
+fn normalize_pointer_type(ty: &str) -> String {
+    normalize_type_name(ty).replace(" *", "*")
+}
+
+fn format_addr(addr: u64) -> String {
+    format!("0x{:x}", addr)
 }

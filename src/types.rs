@@ -1,6 +1,11 @@
+use regex::Regex;
+
 #[derive(Debug, Clone)]
 pub enum TypeLayout {
-    Scalar { type_name: String, size: usize },
+    Scalar {
+        type_name: String,
+        size: usize,
+    },
     Array {
         type_name: String,
         elem_type: String,
@@ -53,8 +58,10 @@ fn parse_array_line(text: &str, word_size: usize) -> Option<TypeLayout> {
             let parts: Vec<_> = rest.trim().split_whitespace().collect();
             if parts.len() >= 2 {
                 let ty = parts[0].to_string();
-                if let Some(len_str) =
-                    parts[1].trim().strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                if let Some(len_str) = parts[1]
+                    .trim()
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
                 {
                     if let Ok(len) = len_str.parse::<usize>() {
                         let elem_size = base_type_size(&ty, word_size);
@@ -91,31 +98,38 @@ fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
         if tline.is_empty() {
             continue;
         }
-        // Expect "type name;" or "type name[len];"
-        if let Some((type_part, name_part)) = tline.split_once(' ') {
-            let mut field_type = type_part.trim().to_string();
-            let mut field_name = name_part.trim().trim_end_matches(';').to_string();
-            let mut size = base_type_size(&field_type, word_size);
-
-            // array field
-            if let Some(idx) = field_name.find('[') {
-                let base_name = field_name[..idx].to_string();
-                let len_str = field_name[idx + 1..].trim_end_matches(']');
-                if let Ok(len) = len_str.parse::<usize>() {
-                    size = size.saturating_mul(len);
-                    field_type = format!("{}[{}]", field_type, len);
-                    field_name = base_name;
-                }
-            }
-
-            fields.push(FieldLayout {
-                name: field_name,
-                type_name: field_type,
-                offset,
-                size,
-            });
-            offset = offset.saturating_add(size);
+        let cleaned = tline.trim_end_matches(';').trim();
+        let (type_part, name_part) = match cleaned.rsplit_once(' ') {
+            Some(v) => v,
+            None => continue,
+        };
+        let mut field_type = type_part.trim().to_string();
+        let mut field_name = name_part.trim().to_string();
+        // Move leading '*' from name into the type to normalize pointer syntax.
+        while field_name.starts_with('*') {
+            field_name.remove(0);
+            field_type.push_str(" *");
         }
+        let mut size = base_type_size(&field_type, word_size);
+
+        // array field
+        if let Some(idx) = field_name.find('[') {
+            let base_name = field_name[..idx].to_string();
+            let len_str = field_name[idx + 1..].trim_end_matches(']');
+            if let Ok(len) = len_str.parse::<usize>() {
+                size = size.saturating_mul(len);
+                field_type = format!("{}[{}]", field_type, len);
+                field_name = base_name;
+            }
+        }
+
+        fields.push(FieldLayout {
+            name: field_name,
+            type_name: field_type,
+            offset,
+            size,
+        });
+        offset = offset.saturating_add(size);
     }
     if fields.is_empty() {
         None
@@ -160,4 +174,28 @@ pub fn normalize_type_name(s: &str) -> String {
     }
     out
 }
-use regex::Regex;
+
+/// Find a pointer field inside a struct, preferring a field literally named "next".
+pub fn find_pointer_field(layout: &TypeLayout) -> Option<&FieldLayout> {
+    if let TypeLayout::Struct { fields, .. } = layout {
+        let mut first_ptr = None;
+        for f in fields {
+            if is_pointer_type(&f.type_name) {
+                if f.name == "next" {
+                    return Some(f);
+                }
+                if first_ptr.is_none() {
+                    first_ptr = Some(f);
+                }
+            }
+        }
+        return first_ptr;
+    }
+    None
+}
+
+/// Basic pointer type heuristic: contains '*' and is not an array declaration.
+pub fn is_pointer_type(ty: &str) -> bool {
+    let t = ty.trim();
+    t.contains('*') && !t.contains('[') && !t.contains(']')
+}

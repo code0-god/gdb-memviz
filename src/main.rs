@@ -1,6 +1,6 @@
 mod interactive;
-mod types;
 mod mi;
+mod types;
 
 use mi::{MiResponse, MiSession, Result};
 
@@ -17,7 +17,9 @@ fn main() -> Result<()> {
                 if let Some(bin) = iter.next() {
                     gdb_bin = bin;
                 } else {
-                    eprintln!("usage: cargo run -- [--verbose|-v] [--gdb <gdb-path>] <target> [args]");
+                    eprintln!(
+                        "usage: cargo run -- [--verbose|-v] [--gdb <gdb-path>] <target> [args]"
+                    );
                     std::process::exit(1);
                 }
             }

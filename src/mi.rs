@@ -1,5 +1,5 @@
+use crate::types::{parse_ptype_output, TypeLayout};
 use regex::Regex;
-use crate::types::{TypeLayout, parse_ptype_output};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -185,7 +185,8 @@ impl MiSession {
     #[allow(dead_code)]
     /// Evaluate address of a symbol using `-data-evaluate-expression`.
     pub fn evaluate_address(&mut self, symbol: &str) -> Result<String> {
-        let cmd = format!("-data-evaluate-expression &{}", symbol);
+        let expr = format!("&{}", symbol);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(&expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -195,7 +196,7 @@ impl MiSession {
 
     /// Evaluate arbitrary expression and return value string.
     pub fn evaluate_expression(&mut self, expr: &str) -> Result<String> {
-        let cmd = format!("-data-evaluate-expression {}", expr);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -235,9 +236,19 @@ impl MiSession {
         None
     }
 
+    /// Fetch a parsed type layout for an arbitrary type name (e.g., "struct Node").
+    pub fn fetch_layout_for_type(&mut self, type_name: &str) -> Option<TypeLayout> {
+        let size = self.evaluate_sizeof(type_name).unwrap_or(self.word_size);
+        if let Ok(txt) = self.ptype_text(type_name) {
+            return Some(parse_ptype_output(&txt, self.word_size, size));
+        }
+        None
+    }
+
     /// Evaluate sizeof(<expr>) and return bytes.
     pub fn evaluate_sizeof(&mut self, expr: &str) -> Result<usize> {
-        let cmd = format!("-data-evaluate-expression sizeof({})", expr);
+        let expr = format!("sizeof({})", expr);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(&expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -340,6 +351,15 @@ impl MiSession {
             arch: self.arch.clone(),
             truncated_from,
         })
+    }
+
+    /// Read a pointer-sized value at the given address, honoring struct field size overrides.
+    pub fn read_pointer_at(&mut self, address: u64, size_override: Option<usize>) -> Result<u64> {
+        self.ensure_word_size();
+        self.ensure_endian();
+        let size = size_override.unwrap_or(self.word_size).max(1);
+        let (_, bytes) = self.read_memory_bytes(&format!("0x{:x}", address), size)?;
+        Ok(bytes_to_u64(&bytes, self.endian))
     }
 
     /// Fetch type name using -var-create/-var-delete. Returns None on failure.
@@ -662,7 +682,11 @@ fn parse_locals(s: &str) -> Vec<LocalVar> {
             for cap in name_re.captures_iter(s) {
                 if let Some(name) = cap.get(1).map(|m| m.as_str().to_string()) {
                     let value = parse_value_field(s);
-                    locals.push(LocalVar { name, ty: None, value });
+                    locals.push(LocalVar {
+                        name,
+                        ty: None,
+                        value,
+                    });
                 }
             }
         }
@@ -678,6 +702,18 @@ fn parse_usize(s: &str) -> std::result::Result<usize, String> {
         trimmed
             .parse::<usize>()
             .map_err(|e| format!("parse usize '{}': {}", trimmed, e))
+    }
+}
+
+fn bytes_to_u64(bytes: &[u8], endian: Endian) -> u64 {
+    let mut buf = [0u8; 8];
+    let len = bytes.len().min(8);
+    if matches!(endian, Endian::Big) {
+        buf[8 - len..].copy_from_slice(&bytes[..len]);
+        u64::from_be_bytes(buf)
+    } else {
+        buf[..len].copy_from_slice(&bytes[..len]);
+        u64::from_le_bytes(buf)
     }
 }
 
@@ -750,6 +786,22 @@ fn unescape_value(raw: &str) -> String {
         }
         out.push(c);
     }
+    out
+}
+
+fn mi_escape(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len() + 2);
+    out.push('"');
+    for ch in expr.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
     out
 }
 
