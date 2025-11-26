@@ -1,10 +1,8 @@
-use crate::mi::{BreakpointInfo, LocalVar, MemoryDump, MiSession, Result, StoppedLocation};
+use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, MiSession, Result, StoppedLocation};
 use std::io::{self, Write};
 
-const MEM_READ_LEN: usize = 32;
-
 pub fn repl(session: &mut MiSession) -> Result<()> {
-    println!("Commands: locals | mem <symbol> | break <loc> | next | step | continue | help | quit");
+    println!("Commands: locals | mem <expr> [len] | break <loc> | next | step | continue | help | quit");
     let stdin = io::stdin();
     let mut line = String::new();
     loop {
@@ -30,23 +28,24 @@ pub fn repl(session: &mut MiSession) -> Result<()> {
                 Err(e) => eprintln!("locals error: {}", e),
             },
             "mem" => {
-                let symbol = rest;
-                if symbol.is_empty() {
-                    println!("usage: mem <symbol>");
+                if rest.is_empty() {
+                    println!("usage: mem <expr> [len]");
                     continue;
                 }
-                match session.evaluate_address(symbol) {
-                    Ok(addr) => match session.read_memory(&addr, MEM_READ_LEN) {
-                        Ok(dump) => print_memory(&dump),
-                        Err(e) => eprintln!("memory read failed: {}", e),
-                    },
-                    Err(e) => {
-                        println!(
-                            "symbol '{}' not found in current frame (only simple symbol names like 'x', 'arr', 'node' are supported in this version). {}",
-                            symbol,
-                            e
-                        );
+                let mut rest_parts = rest.split_whitespace();
+                let expr = rest_parts.next().unwrap_or("");
+                let len_opt = rest_parts.next().map(|s| s.parse::<usize>());
+                let override_len = match len_opt {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(_)) => {
+                        println!("invalid length: {}", rest);
+                        continue;
                     }
+                    None => None,
+                };
+                match session.memory_dump(expr, override_len) {
+                    Ok(dump) => print_memory(&dump),
+                    Err(e) => eprintln!("mem error: {}", e),
                 }
             }
             "break" | "b" => {
@@ -80,7 +79,7 @@ pub fn repl(session: &mut MiSession) -> Result<()> {
 fn print_help() {
     println!("Commands:");
     println!("  locals            - list locals in current frame");
-    println!("  mem <symbol>      - hex dump 32 bytes at &<symbol> (simple symbol names only)");
+    println!("  mem <expr> [len]  - hex dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
     println!("  break <loc> | b   - set breakpoint (e.g. 'break main', 'b file.c:42')");
     println!("  next | n          - execute next line (step over)");
     println!("  step | s          - step into functions");
@@ -105,16 +104,52 @@ fn print_locals(locals: &[LocalVar]) {
 }
 
 fn print_memory(dump: &MemoryDump) {
+    let ty = dump.ty.as_deref().unwrap_or("unknown");
+    println!("symbol: {} ({})", dump.expr, ty);
     println!("address: {}", dump.address);
+    let size = dump.bytes.len();
+    let words = (size + dump.word_size - 1) / dump.word_size.max(1);
+    println!(
+        "size: {} bytes (requested: {}, {} words, word size = {})",
+        size, dump.requested, words, dump.word_size
+    );
+    let endian_str = match dump.endian {
+        Endian::Little => "little-endian",
+        Endian::Big => "big-endian",
+        Endian::Unknown => "endian-unknown",
+    };
+    let arch_str = dump.arch.as_deref().unwrap_or("unknown");
+    println!("layout: {} (arch={})", endian_str, arch_str);
+    if let Some(orig) = dump.truncated_from {
+        if orig > size {
+            println!("(truncated to {} bytes from {})", size, orig);
+        }
+    }
     if dump.bytes.is_empty() {
         println!("bytes(0): (no bytes read)");
         return;
     }
-    println!("bytes({}):", dump.bytes.len());
-    for (i, chunk) in dump.bytes.chunks(16).enumerate() {
-        let offset = i * 16;
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
-        println!("  0x{:02x}: {}", offset, hex.join(" "));
+    println!("words:");
+    let w = dump.word_size.max(1);
+    for (i, chunk) in dump.bytes.chunks(w).enumerate() {
+        let offset = i * w;
+        let mut hex: Vec<String> = Vec::new();
+        let mut ascii_bytes: Vec<u8> = Vec::new();
+        for j in 0..w {
+            if let Some(b) = chunk.get(j) {
+                hex.push(format!("{:02x}", b));
+                ascii_bytes.push(*b);
+            } else {
+                hex.push("..".to_string());
+                ascii_bytes.push(b'.');
+            }
+        }
+        println!(
+            "  +0x{:02x}: {} | ascii=\"{}\"",
+            offset,
+            hex.join(" "),
+            ascii_repr(&ascii_bytes)
+        );
     }
 }
 
@@ -128,9 +163,28 @@ fn print_breakpoint(bp: &BreakpointInfo) {
 }
 
 fn print_stopped(loc: &StoppedLocation) {
-    match (&loc.file, &loc.line, &loc.func) {
-        (Some(f), Some(l), Some(func)) => println!("stopped at {}:{} ({})", f, l, func),
-        (Some(f), Some(l), None) => println!("stopped at {}:{}", f, l),
-        _ => println!("stopped (location unknown)"),
+    let where_str = match (&loc.file, &loc.line, &loc.func) {
+        (Some(f), Some(l), Some(func)) => format!("stopped at {}:{} ({})", f, l, func),
+        (Some(f), Some(l), None) => format!("stopped at {}:{}", f, l),
+        _ => "stopped (location unknown)".to_string(),
+    };
+    if let Some(reason) = &loc.reason {
+        println!("{} | reason: {}", where_str, reason);
+    } else {
+        println!("{}", where_str);
     }
+}
+
+fn ascii_repr(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| {
+            let c = *b as char;
+            if (0x20..=0x7e).contains(b) {
+                c
+            } else {
+                '.'
+            }
+        })
+        .collect()
 }
