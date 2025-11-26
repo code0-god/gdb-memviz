@@ -1,7 +1,8 @@
 mod interactive;
+mod types;
 mod mi;
 
-use mi::{MiResponse, MiSession, MiStatus, Result};
+use mi::{MiResponse, MiSession, Result};
 
 fn main() -> Result<()> {
     let mut gdb_bin = std::env::var("GDB").unwrap_or_else(|_| "gdb".to_string());
@@ -49,11 +50,14 @@ fn main() -> Result<()> {
     session.drain_initial_output()?;
 
     println!("\n# probing gdb");
-    describe_response("version", &session.exec_command("-gdb-version")?);
-    describe_response("features", &session.exec_command("-list-features")?);
+    let version = session.exec_command("-gdb-version")?;
+    let features = session.exec_command("-list-features")?;
+    describe_response("version", &version, verbose);
+    describe_response("features", &features, verbose);
 
     println!("\n# break main and run");
     session.run_to_main()?;
+    session.ensure_word_size();
     println!("Reached breakpoint at main. Type 'help' for commands.");
 
     interactive::repl(&mut session)?;
@@ -61,19 +65,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn describe_response(label: &str, resp: &MiResponse) {
-    match &resp.status {
-        MiStatus::Done | MiStatus::Running => {
-            println!("[{}] {}", label, resp.result);
-        }
-        MiStatus::Error(msg) => {
-            println!("[{}] error: {}", label, msg);
-        }
-        MiStatus::Other(msg) => {
-            println!("[{}] {}", label, msg);
-        }
+fn describe_response(label: &str, resp: &MiResponse, verbose: bool) {
+    if !verbose {
+        return;
     }
+    eprintln!("[{}] {}", label, resp.result);
     for line in &resp.oob {
-        println!("  {}", line);
+        eprintln!("  {}", line);
     }
 }
