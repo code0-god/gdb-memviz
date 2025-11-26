@@ -1,5 +1,6 @@
 use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, MiSession, Result, StoppedLocation};
 use crate::types::{TypeLayout, normalize_type_name};
+use regex::Regex;
 use std::io::{self, Write};
 
 pub fn repl(session: &mut MiSession) -> Result<()> {
@@ -182,7 +183,11 @@ fn print_locals(locals: &[LocalVar]) {
         return;
     }
     for (i, var) in locals.iter().enumerate() {
-        let value = var.value.as_deref().unwrap_or("<unavailable>");
+        let value = var
+            .value
+            .as_ref()
+            .map(|v| prettify_value(v))
+            .unwrap_or_else(|| "<unavailable>".to_string());
         let prefix = match var.ty.as_deref() {
             Some(ty) => format!("{} {}", normalize_type_name(ty), var.name),
             None => var.name.clone(),
@@ -280,4 +285,21 @@ fn ascii_repr(bytes: &[u8]) -> String {
             }
         })
         .collect()
+}
+
+fn prettify_value(s: &str) -> String {
+    // Collapse gdb-style "'\000' <repeats N times>" into "\0 (xN)" for readability.
+    let patterns = [
+        r"'\\0+' <repeats ([0-9]+) times>",
+        r"'\0+' <repeats ([0-9]+) times>",
+    ];
+    for pat in patterns {
+        if let Ok(re) = Regex::new(pat) {
+            let replaced = re.replace_all(s, "\\0 (x$1)").to_string();
+            if replaced != s {
+                return replaced;
+            }
+        }
+    }
+    s.to_string()
 }

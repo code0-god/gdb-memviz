@@ -733,6 +733,17 @@ fn unescape_value(raw: &str) -> String {
                         chars.next();
                         continue;
                     }
+                    '0' => {
+                        // Preserve explicit \0 / \000 sequences verbatim so downstream
+                        // pretty-printers can decide how to show them.
+                        out.push('\\');
+                        out.push('0');
+                        while let Some('0') = chars.peek() {
+                            out.push('0');
+                            chars.next();
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
             }
