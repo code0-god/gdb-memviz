@@ -1,77 +1,23 @@
-use regex::Regex;
-use crate::types::{TypeLayout, parse_ptype_output};
+use crate::mi::models::{
+    BreakpointInfo, Endian, LocalVar, MemoryDump, MiResponse, MiStatus, Result, StoppedLocation,
+};
+use crate::mi::parser::{
+    bytes_to_u64, guess_endian_from_arch, mi_escape, parse_addr_field, parse_breakpoint,
+    parse_endian, parse_locals, parse_memory_contents, parse_status, parse_stopped,
+    parse_type_field, parse_usize, parse_value_field, parse_var_name,
+};
+use crate::types::{parse_ptype_output, TypeLayout};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const MAX_DUMP_BYTES: usize = 512;
 const VAR_CREATE_AUTO: &str = "-";
-
-#[derive(Debug, Clone, Copy)]
-pub enum Endian {
-    Little,
-    Big,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalVar {
-    pub name: String,
-    pub ty: Option<String>,
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryDump {
-    pub expr: String,
-    pub ty: Option<String>,
-    pub address: String,
-    pub bytes: Vec<u8>,
-    pub word_size: usize,
-    pub requested: usize,
-    pub endian: Endian,
-    pub arch: Option<String>,
-    pub truncated_from: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StoppedLocation {
-    pub func: Option<String>,
-    pub file: Option<String>,
-    pub line: Option<u32>,
-    pub reason: Option<String>,
-    pub arch: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BreakpointInfo {
-    pub number: u32,
-    pub file: Option<String>,
-    pub line: Option<u32>,
-    pub func: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MiResponse {
-    pub status: MiStatus,
-    pub result: String,
-    pub oob: Vec<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum MiStatus {
-    Done,
-    Running,
-    Error(String),
-    Other(String),
-}
 
 pub struct MiSession {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    verbose: bool,
+    verbose: bool, // when true, echo MI traffic to stderr for debugging
     pub word_size: usize,
     word_known: bool,
     pub endian: Endian,
@@ -80,6 +26,7 @@ pub struct MiSession {
 
 impl MiSession {
     pub fn start(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<Self> {
+        // Spawn gdb in MI mode (`-i=mi`) with quiet banner. Target args are passed as-is.
         let mut cmd = Command::new(gdb_bin);
         cmd.arg("-q").arg("-i=mi").arg("--args").arg(target);
         for a in args {
@@ -140,6 +87,7 @@ impl MiSession {
 
     /// Insert breakpoint at main, run, and wait until it stops.
     pub fn run_to_main(&mut self) -> Result<()> {
+        // Best-effort: set a breakpoint on main, run, and block until a stop event arrives.
         let resp = self.exec_command("-break-insert main")?;
         match resp.status {
             MiStatus::Error(msg) => {
@@ -185,7 +133,8 @@ impl MiSession {
     #[allow(dead_code)]
     /// Evaluate address of a symbol using `-data-evaluate-expression`.
     pub fn evaluate_address(&mut self, symbol: &str) -> Result<String> {
-        let cmd = format!("-data-evaluate-expression &{}", symbol);
+        let expr = format!("&{}", symbol);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(&expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -195,7 +144,7 @@ impl MiSession {
 
     /// Evaluate arbitrary expression and return value string.
     pub fn evaluate_expression(&mut self, expr: &str) -> Result<String> {
-        let cmd = format!("-data-evaluate-expression {}", expr);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -205,6 +154,7 @@ impl MiSession {
 
     /// Run ptype and return console text.
     pub fn ptype_text(&mut self, symbol: &str) -> Result<String> {
+        // We call into the CLI `ptype` because MI lacks a clean equivalent for pretty layout.
         let cmd = format!("-interpreter-exec console \"ptype {}\"", symbol);
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
@@ -235,9 +185,19 @@ impl MiSession {
         None
     }
 
+    /// Fetch a parsed type layout for an arbitrary type name (e.g., "struct Node").
+    pub fn fetch_layout_for_type(&mut self, type_name: &str) -> Option<TypeLayout> {
+        let size = self.evaluate_sizeof(type_name).unwrap_or(self.word_size);
+        if let Ok(txt) = self.ptype_text(type_name) {
+            return Some(parse_ptype_output(&txt, self.word_size, size));
+        }
+        None
+    }
+
     /// Evaluate sizeof(<expr>) and return bytes.
     pub fn evaluate_sizeof(&mut self, expr: &str) -> Result<usize> {
-        let cmd = format!("-data-evaluate-expression sizeof({})", expr);
+        let expr = format!("sizeof({})", expr);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(&expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -257,6 +217,7 @@ impl MiSession {
                 self.word_known = true;
             }
             _ => {
+                // If gdb cannot answer, assume 64-bit to keep dumps aligned.
                 if self.verbose {
                     eprintln!("[warn] failed to detect word size; defaulting to 8");
                 }
@@ -285,7 +246,7 @@ impl MiSession {
             eprintln!("[warn] failed to detect endian; leaving Unknown");
         }
 
-        // Try to guess from arch if already known.
+        // Try to guess from arch if already known; otherwise default to little.
         if let Some(arch) = &self.arch {
             if let Some(guessed) = guess_endian_from_arch(arch) {
                 self.endian = guessed;
@@ -311,6 +272,7 @@ impl MiSession {
         if requested == 0 {
             requested = 32;
         }
+        // Cap dump size to avoid overwhelming output/logs.
         let mut truncated_from = None;
         if requested > MAX_DUMP_BYTES {
             truncated_from = Some(requested);
@@ -340,6 +302,15 @@ impl MiSession {
             arch: self.arch.clone(),
             truncated_from,
         })
+    }
+
+    /// Read a pointer-sized value at the given address, honoring struct field size overrides.
+    pub fn read_pointer_at(&mut self, address: u64, size_override: Option<usize>) -> Result<u64> {
+        self.ensure_word_size();
+        self.ensure_endian();
+        let size = size_override.unwrap_or(self.word_size).max(1);
+        let (_, bytes) = self.read_memory_bytes(&format!("0x{:x}", address), size)?;
+        Ok(bytes_to_u64(&bytes, self.endian))
     }
 
     /// Fetch type name using -var-create/-var-delete. Returns None on failure.
@@ -491,6 +462,7 @@ impl MiSession {
     }
 
     fn read_response(&mut self) -> Result<MiResponse> {
+        // Collect a single result record (^done/^error/...) and any preceding async output.
         let mut oob = Vec::new();
         let mut result_line: Option<String> = None;
         let mut saw_prompt = false;
@@ -535,6 +507,8 @@ impl MiSession {
     }
 
     fn read_until_prompt(&mut self, require_result: bool) -> Result<Vec<String>> {
+        // Helper for initial banner drain; returns all lines until a prompt, optionally
+        // insisting that we saw a result record before exiting.
         let mut lines = Vec::new();
         let mut saw_result = false;
         loop {
@@ -560,273 +534,4 @@ impl MiSession {
         }
         Ok(lines)
     }
-}
-
-fn parse_status(line: &str) -> MiStatus {
-    if line.starts_with("^done") {
-        MiStatus::Done
-    } else if line.starts_with("^running") {
-        MiStatus::Running
-    } else if line.starts_with("^error") {
-        let msg = parse_msg_field(line).unwrap_or_else(|| line.to_string());
-        MiStatus::Error(msg)
-    } else {
-        MiStatus::Other(line.to_string())
-    }
-}
-
-fn parse_msg_field(s: &str) -> Option<String> {
-    Regex::new(r#"msg="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| c[1].to_string()))
-}
-
-fn parse_value_field(s: &str) -> Option<String> {
-    Regex::new(r#"value="((?:\\.|[^"])*)""#)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
-}
-
-fn parse_type_field(s: &str) -> Option<String> {
-    Regex::new(r#"type="((?:\\.|[^"])*)""#)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
-}
-
-fn parse_addr_field(s: &str) -> Option<String> {
-    Regex::new(r#"addr="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| c[1].to_string()))
-}
-
-fn parse_memory_contents(s: &str) -> Result<Vec<u8>> {
-    // Preferred MI form: memory=[{...,bytes="aabbcc"}]
-    if let Some(caps) = Regex::new(r#"bytes="([0-9a-fA-F]+)""#)?.captures(s) {
-        return hex_str_to_bytes(&caps[1]);
-    }
-    // Another form: contents="aa bb cc" or contents="aabbcc"
-    if let Some(caps) = Regex::new(r#"contents="([^"]+)""#)?.captures(s) {
-        let hex = &caps[1];
-        if hex.contains(' ') {
-            return Ok(split_hex_bytes(hex));
-        } else {
-            return hex_str_to_bytes(hex);
-        }
-    }
-    // Common MI form: contents=["0xaa","0xbb",...]
-    if let Some(caps) = Regex::new(r#"contents=\[([^\]]+)\]"#)?.captures(s) {
-        return parse_hex_list(&caps[1]);
-    }
-    // Fallback for data=[...] form (legacy).
-    if let Some(caps) = Regex::new(r#"data=\[([^\]]+)\]"#)?.captures(s) {
-        return parse_hex_list(&caps[1]);
-    }
-    Err("no memory contents found".into())
-}
-
-fn parse_hex_list(list: &str) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    for part in list.split(',') {
-        if let Some(b) = parse_hex_byte(part) {
-            bytes.push(b);
-        }
-    }
-    Ok(bytes)
-}
-
-fn split_hex_bytes(s: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    for part in s.split_whitespace() {
-        if let Some(b) = parse_hex_byte(part) {
-            out.push(b);
-        }
-    }
-    out
-}
-
-fn parse_locals(s: &str) -> Vec<LocalVar> {
-    let mut locals = Vec::new();
-    if let Ok(re) = Regex::new(
-        r#"\{[^}]*name="(?P<name>[^"]+)"[^}]*?(?:type="(?P<type>(?:\\.|[^"])*)")?[^}]*?(?:value="(?P<value>(?:\\.|[^"])*)")?[^}]*\}"#,
-    ) {
-        for cap in re.captures_iter(s) {
-            if let Some(name) = cap.name("name").map(|m| m.as_str().to_string()) {
-                let value = cap.name("value").map(|m| unescape_value(m.as_str()));
-                let ty = cap.name("type").map(|m| unescape_value(m.as_str()));
-                locals.push(LocalVar { name, ty, value });
-            }
-        }
-    }
-    if locals.is_empty() {
-        if let Ok(name_re) = Regex::new("name=\"([^\"]+)\"") {
-            for cap in name_re.captures_iter(s) {
-                if let Some(name) = cap.get(1).map(|m| m.as_str().to_string()) {
-                    let value = parse_value_field(s);
-                    locals.push(LocalVar { name, ty: None, value });
-                }
-            }
-        }
-    }
-    locals
-}
-
-fn parse_usize(s: &str) -> std::result::Result<usize, String> {
-    let trimmed = s.trim();
-    if let Some(hex) = trimmed.strip_prefix("0x") {
-        usize::from_str_radix(hex, 16).map_err(|e| format!("parse hex usize '{}': {}", trimmed, e))
-    } else {
-        trimmed
-            .parse::<usize>()
-            .map_err(|e| format!("parse usize '{}': {}", trimmed, e))
-    }
-}
-
-fn parse_hex_byte(raw: &str) -> Option<u8> {
-    let trimmed = raw.trim().trim_matches('"');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let num = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    u8::from_str_radix(num, 16).ok()
-}
-
-fn hex_str_to_bytes(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
-        return Err("odd-length hex string in memory contents".into());
-    }
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < s.len() {
-        let byte = &s[i..i + 2];
-        let b = u8::from_str_radix(byte, 16)
-            .map_err(|_| format!("invalid hex byte '{}' in memory contents", byte))?;
-        out.push(b);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn unescape_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.peek() {
-                match *next {
-                    '\\' => {
-                        out.push('\\');
-                        chars.next();
-                        continue;
-                    }
-                    '"' => {
-                        out.push('"');
-                        chars.next();
-                        continue;
-                    }
-                    'n' => {
-                        out.push('\n');
-                        chars.next();
-                        continue;
-                    }
-                    't' => {
-                        out.push('\t');
-                        chars.next();
-                        continue;
-                    }
-                    '0' => {
-                        // Preserve explicit \0 / \000 sequences verbatim so downstream
-                        // pretty-printers can decide how to show them.
-                        out.push('\\');
-                        out.push('0');
-                        while let Some('0') = chars.peek() {
-                            out.push('0');
-                            chars.next();
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn parse_stopped(line: &str) -> StoppedLocation {
-    let reason = Regex::new(r#"reason="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
-    let func = Regex::new(r#"func="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
-    let file = Regex::new(r#"file="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
-    let line_no = Regex::new(r#"line="([0-9]+)""#)
-        .ok()
-        .and_then(|re| re.captures(line).and_then(|c| c[1].parse::<u32>().ok()));
-    let arch = Regex::new(r#"arch="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
-    StoppedLocation {
-        func,
-        file,
-        line: line_no,
-        reason,
-        arch,
-    }
-}
-
-fn parse_breakpoint(res: &str) -> BreakpointInfo {
-    let num = Regex::new(r#"number="([0-9]+)""#)
-        .ok()
-        .and_then(|re| re.captures(res).and_then(|c| c[1].parse::<u32>().ok()))
-        .unwrap_or(0);
-    let func = Regex::new(r#"func="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(res).map(|c| c[1].to_string()));
-    let file = Regex::new(r#"file="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(res).map(|c| c[1].to_string()));
-    let line = Regex::new(r#"line="([0-9]+)""#)
-        .ok()
-        .and_then(|re| re.captures(res).and_then(|c| c[1].parse::<u32>().ok()));
-    BreakpointInfo {
-        number: num,
-        file,
-        line,
-        func,
-    }
-}
-
-fn parse_var_name(s: &str) -> Option<String> {
-    Regex::new(r#"name="([^"]+)""#)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| c[1].to_string()))
-}
-
-fn parse_endian(val: &str) -> Endian {
-    let lower = val.to_ascii_lowercase();
-    if lower.contains("little") {
-        Endian::Little
-    } else if lower.contains("big") {
-        Endian::Big
-    } else {
-        Endian::Unknown
-    }
-}
-
-fn guess_endian_from_arch(arch: &str) -> Option<Endian> {
-    let a = arch.to_ascii_lowercase();
-    if a.contains("x86") || a.contains("amd64") || a.contains("i386") {
-        return Some(Endian::Little);
-    }
-    if a.contains("aarch64") || a.contains("arm") {
-        return Some(Endian::Little);
-    }
-    if a.contains("riscv") {
-        return Some(Endian::Little);
-    }
-    None
 }

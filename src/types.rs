@@ -1,11 +1,17 @@
+use regex::Regex;
+
 #[derive(Debug, Clone)]
 pub enum TypeLayout {
-    Scalar { type_name: String, size: usize },
+    Scalar {
+        type_name: String,
+        size: usize,
+    },
     Array {
         type_name: String,
         elem_type: String,
         elem_size: usize,
         len: usize,
+        #[allow(dead_code)]
         size: usize,
     },
     Struct {
@@ -53,8 +59,10 @@ fn parse_array_line(text: &str, word_size: usize) -> Option<TypeLayout> {
             let parts: Vec<_> = rest.trim().split_whitespace().collect();
             if parts.len() >= 2 {
                 let ty = parts[0].to_string();
-                if let Some(len_str) =
-                    parts[1].trim().strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                if let Some(len_str) = parts[1]
+                    .trim()
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
                 {
                     if let Ok(len) = len_str.parse::<usize>() {
                         let elem_size = base_type_size(&ty, word_size);
@@ -75,6 +83,8 @@ fn parse_array_line(text: &str, word_size: usize) -> Option<TypeLayout> {
 }
 
 fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
+    // Very small parser: assumes flat "type name;" lines inside the struct and estimates size
+    // by accumulating base sizes (no padding handling).
     let mut lines = text.lines();
     let header = lines.find(|l| l.contains("type = struct"))?;
     let name = Regex::new(r"type\s*=\s*struct\s+([A-Za-z0-9_]+)")
@@ -91,31 +101,38 @@ fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
         if tline.is_empty() {
             continue;
         }
-        // Expect "type name;" or "type name[len];"
-        if let Some((type_part, name_part)) = tline.split_once(' ') {
-            let mut field_type = type_part.trim().to_string();
-            let mut field_name = name_part.trim().trim_end_matches(';').to_string();
-            let mut size = base_type_size(&field_type, word_size);
-
-            // array field
-            if let Some(idx) = field_name.find('[') {
-                let base_name = field_name[..idx].to_string();
-                let len_str = field_name[idx + 1..].trim_end_matches(']');
-                if let Ok(len) = len_str.parse::<usize>() {
-                    size = size.saturating_mul(len);
-                    field_type = format!("{}[{}]", field_type, len);
-                    field_name = base_name;
-                }
-            }
-
-            fields.push(FieldLayout {
-                name: field_name,
-                type_name: field_type,
-                offset,
-                size,
-            });
-            offset = offset.saturating_add(size);
+        let cleaned = tline.trim_end_matches(';').trim();
+        let (type_part, name_part) = match cleaned.rsplit_once(' ') {
+            Some(v) => v,
+            None => continue,
+        };
+        let mut field_type = type_part.trim().to_string();
+        let mut field_name = name_part.trim().to_string();
+        // Move leading '*' from name into the type to normalize pointer syntax.
+        while field_name.starts_with('*') {
+            field_name.remove(0);
+            field_type.push_str(" *");
         }
+        let mut size = base_type_size(&field_type, word_size);
+
+        // array field
+        if let Some(idx) = field_name.find('[') {
+            let base_name = field_name[..idx].to_string();
+            let len_str = field_name[idx + 1..].trim_end_matches(']');
+            if let Ok(len) = len_str.parse::<usize>() {
+                size = size.saturating_mul(len);
+                field_type = format!("{}[{}]", field_type, len);
+                field_name = base_name;
+            }
+        }
+
+        fields.push(FieldLayout {
+            name: field_name,
+            type_name: field_type,
+            offset,
+            size,
+        });
+        offset = offset.saturating_add(size);
     }
     if fields.is_empty() {
         None
@@ -129,6 +146,7 @@ fn parse_struct_block(text: &str, word_size: usize) -> Option<TypeLayout> {
 }
 
 fn base_type_size(type_name: &str, word_size: usize) -> usize {
+    // Crude size guesser for simple C types; pointer width falls back to detected word size.
     let t = type_name.trim();
     if t.ends_with('*') {
         return word_size.max(1);
@@ -147,6 +165,7 @@ fn base_type_size(type_name: &str, word_size: usize) -> usize {
 
 /// Normalize type string for display (e.g., "int [5]" -> "int[5]").
 pub fn normalize_type_name(s: &str) -> String {
+    // Remove spaces before array brackets to make output more compact/readable.
     let trimmed = s.trim();
     let mut out = String::with_capacity(trimmed.len());
     let mut chars = trimmed.chars().peekable();
@@ -160,4 +179,94 @@ pub fn normalize_type_name(s: &str) -> String {
     }
     out
 }
-use regex::Regex;
+
+/// Find a pointer field inside a struct, preferring a field literally named "next".
+pub fn find_pointer_field(layout: &TypeLayout) -> Option<&FieldLayout> {
+    if let TypeLayout::Struct { fields, .. } = layout {
+        let mut first_ptr = None;
+        for f in fields {
+            if is_pointer_type(&f.type_name) {
+                if f.name == "next" {
+                    return Some(f);
+                }
+                if first_ptr.is_none() {
+                    first_ptr = Some(f);
+                }
+            }
+        }
+        return first_ptr;
+    }
+    None
+}
+
+/// Basic pointer type heuristic: contains '*' and is not an array declaration.
+pub fn is_pointer_type(ty: &str) -> bool {
+    let t = ty.trim();
+    t.contains('*') && !t.contains('[') && !t.contains(']')
+}
+
+/// Strip trailing '*' characters and surrounding spaces from a pointer type name.
+pub fn strip_pointer_suffix(ty: &str) -> String {
+    let mut trimmed = ty.trim().to_string();
+    while trimmed.ends_with('*') {
+        trimmed.pop();
+    }
+    trimmed.trim().to_string()
+}
+
+/// Normalize pointer type spacing for display (e.g., "struct Node *" -> "struct Node*").
+pub fn normalize_pointer_type(ty: &str) -> String {
+    normalize_type_name(ty).replace(" *", "*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_type_name_removes_array_spaces() {
+        assert_eq!(normalize_type_name("int [5]"), "int[5]");
+        assert_eq!(normalize_type_name("struct Node *"), "struct Node *");
+    }
+
+    #[test]
+    fn base_type_size_matches_word_size_for_pointers() {
+        assert_eq!(base_type_size("int *", 8), 8);
+        assert_eq!(base_type_size("char", 4), 1);
+    }
+
+    #[test]
+    fn parse_ptype_handles_array() {
+        let text = "type = int [5]";
+        let layout = parse_ptype_output(text, 8, 4);
+        match layout {
+            TypeLayout::Array {
+                elem_size, len, ..
+            } => {
+                assert_eq!(elem_size, 4);
+                assert_eq!(len, 5);
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn parse_ptype_handles_struct() {
+        let text = r#"
+type = struct Node {
+    int id;
+    int count;
+    char name[16];
+    struct Node *next;
+}
+"#;
+        let layout = parse_ptype_output(text, 8, 4);
+        match layout {
+            TypeLayout::Struct { fields, size, .. } => {
+                assert_eq!(fields.len(), 4);
+                assert_eq!(size, 32);
+            }
+            _ => panic!("expected struct"),
+        }
+    }
+}
