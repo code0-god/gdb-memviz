@@ -9,6 +9,14 @@ struct Node {
     struct Node *next;
 };
 
+struct Pad {
+    char c;
+    int i;
+    short s;
+    char buf[3];
+    void *p;
+};
+
 static void helper(int seed, struct Node *node) {
     int local = seed * 3;
     int helper_arr[4] = {11, 22, 33, 44};
@@ -25,7 +33,8 @@ int main(int argc, char **argv) {
     struct Node node0 = {0, 10, "node0", NULL};
     struct Node node1 = {1, 20, "node1", NULL};
     struct Node node2 = {2, 30, "node2", NULL};
-
+    struct Pad pad = {'p', 10, 2, "pt", NULL};
+    
     node0.next = &node1;
     node1.next = &node2;
     node2.next = NULL;

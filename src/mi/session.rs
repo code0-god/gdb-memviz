@@ -76,6 +76,7 @@ impl MiSession {
             }
         }
         self.ensure_endian();
+        self.ensure_arch();
         Ok(())
     }
 
@@ -155,7 +156,7 @@ impl MiSession {
     /// Run ptype and return console text.
     pub fn ptype_text(&mut self, symbol: &str) -> Result<String> {
         // We call into the CLI `ptype` because MI lacks a clean equivalent for pretty layout.
-        let cmd = format!("-interpreter-exec console \"ptype {}\"", symbol);
+        let cmd = format!("-interpreter-exec console \"ptype /o {}\"", symbol);
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
@@ -235,14 +236,15 @@ impl MiSession {
         let resp = self.exec_command("-gdb-show endian");
         if let Ok(r) = resp {
             if let Some(val) = parse_value_field(&r.result) {
-                self.endian = parse_endian(&val);
-                if matches!(self.endian, Endian::Unknown) && self.verbose {
+                let parsed = parse_endian(&val);
+                if !matches!(parsed, Endian::Unknown) {
+                    self.endian = parsed;
+                    return;
+                } else if self.verbose {
                     eprintln!("[warn] could not parse endian from '{}'", val);
                 }
-                return;
             }
-        }
-        if self.verbose {
+        } else if self.verbose {
             eprintln!("[warn] failed to detect endian; leaving Unknown");
         }
 
@@ -255,6 +257,23 @@ impl MiSession {
         }
         // Last resort: assume little-endian (common on modern targets).
         self.endian = Endian::Little;
+    }
+
+    /// Detect architecture via `-gdb-show architecture` (best-effort).
+    pub fn ensure_arch(&mut self) {
+        if self.arch.is_some() {
+            return;
+        }
+        if let Ok(resp) = self.exec_command("-gdb-show architecture") {
+            if let Some(val) = parse_value_field(&resp.result) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && trimmed != "auto" {
+                    self.arch = Some(trimmed.to_string());
+                    return;
+                }
+            }
+        }
+        // Leave as None if gdb cannot provide it; later stop events may fill it.
     }
 
     /// Higher-level memory dump that respects sizeof(expr) and word size.

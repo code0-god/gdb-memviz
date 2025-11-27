@@ -92,6 +92,8 @@ fn handle_mem(rest: &str, session: &mut MiSession) {
 }
 
 fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
+    // Make sure endian is resolved before printing layout info.
+    session.ensure_endian();
     let size = match session.evaluate_sizeof(symbol) {
         Ok(sz) => sz,
         Err(e) => {
