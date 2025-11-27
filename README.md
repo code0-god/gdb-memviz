@@ -29,16 +29,16 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 ## Build & Run
 ```bash
 # 예제 C 프로그램 빌드
-gcc -g examples/phase1_sample.c -o examples/phase1_sample
+gcc -g examples/sample.c -o examples/sample
 
 # Rust 바이너리 빌드
 cargo build
 
 # gdb-memviz 실행 (기본 gdb 사용, 로그 최소화)
-cargo run -- ./examples/phase1_sample
+cargo run -- ./examples/sample
 
 # gdb 경로 지정/로그 확인 예시
-cargo run -- --gdb /usr/bin/gdb --verbose ./examples/phase1_sample
+cargo run -- --gdb /usr/bin/gdb --verbose ./examples/sample
 ```
 
 REPL에서 사용할 수 있는 명령:
@@ -47,7 +47,7 @@ memviz> locals
 memviz> mem node           # sizeof(node)만큼 덤프 (최대 512B)
 memviz> mem arr 16         # 길이 명시
 memviz> view node          # struct/array 레이아웃 + raw 덤프
-memviz> break examples/phase1_sample.c:30
+memviz> break examples/sample.c:30
 memviz> follow node_ptr    # 포인터 체인 탐색 (옵션 depth 생략 시 기본값)
 memviz> next / step / continue
 memviz> help
@@ -56,8 +56,8 @@ memviz> quit
 
 ## Example Session
 ```
-$ cargo run -- ./examples/phase1_sample
-[gdb-memviz] gdb: gdb | target: ./examples/phase1_sample [] | verbose: false
+$ cargo run -- ./examples/sample
+[gdb-memviz] gdb: gdb | target: ./examples/sample [] | verbose: false
 
 # probing gdb ...
 
@@ -65,10 +65,10 @@ $ cargo run -- ./examples/phase1_sample
 Reached breakpoint at main. Type 'help' for commands.
 Commands: locals | mem <expr> [len] | view <symbol> | follow <symbol> [depth] | break <loc> | next | step | continue | help | quit
 
-memviz> break examples/phase1_sample.c:36
-breakpoint 2 at examples/phase1_sample.c:36
+memviz> break examples/sample.c:36
+breakpoint 2 at examples/sample.c:36
 memviz> continue
-stopped at examples/phase1_sample.c:36 (main) | reason: breakpoint-hit
+stopped at examples/sample.c:36 (main) | reason: breakpoint-hit
 memviz> locals
 0: int x = 42
 1: int y = 8
