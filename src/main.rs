@@ -2,6 +2,7 @@
 mod interactive;
 mod mi;
 mod types;
+mod vm;
 
 use mi::{MiResponse, MiSession, Result};
 

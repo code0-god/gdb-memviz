@@ -276,6 +276,68 @@ impl MiSession {
         // Leave as None if gdb cannot provide it; later stop events may fill it.
     }
 
+    /// Try to obtain the inferior process pid from `info proc`.
+    pub fn inferior_pid(&mut self) -> Result<u32> {
+        let cmd = "-interpreter-exec console \"info proc\"";
+        let resp = self.exec_command(cmd)?;
+        let mut text = String::new();
+        text.push_str(&resp.result);
+        text.push('\n');
+        for line in &resp.oob {
+            let clean = line
+                .trim_start_matches("~\"")
+                .trim_end_matches('"')
+                .replace("\\n", "\n");
+            text.push_str(&clean);
+            text.push('\n');
+        }
+        for line in text.lines() {
+            if line.contains("process") {
+                let mut parts = line.split_whitespace();
+                while let Some(tok) = parts.next() {
+                    if tok == "process" {
+                        if let Some(pid_str) = parts.next() {
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                return Ok(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err("could not determine inferior pid from 'info proc'".into())
+    }
+
+    /// Evaluate expression and return (type, value) strings.
+    pub fn eval_expr_type_and_value(&mut self, expr: &str) -> Result<(String, String)> {
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(expr));
+        let resp = self.exec_command(&cmd)?;
+        if let MiStatus::Error(msg) = resp.status.clone() {
+            return Err(format!("{}", msg).into());
+        }
+        let value = parse_value_field(&resp.result)
+            .or_else(|| resp.oob.iter().find_map(|l| parse_value_field(l)))
+            .ok_or("value not found in MI response")?;
+
+        let ty = parse_type_field(&resp.result)
+            .or_else(|| self.fetch_type(expr))
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok((ty, value))
+    }
+
+    /// Evaluate address of an expression and return as u64.
+    pub fn eval_address_of_expr(&mut self, expr: &str) -> Result<u64> {
+        let addr_expr = format!("&({})", expr);
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(&addr_expr));
+        let resp = self.exec_command(&cmd)?;
+        if let MiStatus::Error(msg) = resp.status.clone() {
+            return Err(format!("{}", msg).into());
+        }
+        let raw = parse_value_field(&resp.result).ok_or("address not found in MI response")?;
+        let val = parse_usize(&raw)?;
+        Ok(val as u64)
+    }
+
     /// Higher-level memory dump that respects sizeof(expr) and word size.
     pub fn memory_dump(&mut self, expr: &str, override_len: Option<usize>) -> Result<MemoryDump> {
         self.ensure_word_size();

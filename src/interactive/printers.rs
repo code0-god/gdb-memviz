@@ -1,4 +1,5 @@
 use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, StoppedLocation};
+use crate::vm::{VmLabel, VmRegion};
 use crate::types::normalize_type_name;
 use regex::Regex;
 
@@ -143,6 +144,176 @@ pub fn prettify_value(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_region_desc(region: &VmRegion) -> String {
+    if region.pathname == "[heap]" {
+        "(heap)".to_string()
+    } else if region.pathname == "[stack]" {
+        "(stack)".to_string()
+    } else {
+        region.pathname.clone()
+    }
+}
+
+pub fn print_vm_regions(regions: &[VmRegion]) {
+    println!("regions:");
+    for r in regions {
+        let label = match &r.label {
+            VmLabel::Text => "[text]",
+            VmLabel::Data => "[data]",
+            VmLabel::Heap => "[heap]",
+            VmLabel::Stack => "[stack]",
+            VmLabel::Lib => "[lib]",
+            VmLabel::Anonymous => "[anon]",
+            VmLabel::Other(_) => "[other]",
+        };
+        let size_str = format_size(r.size());
+        let desc = format_region_desc(r);
+
+        if desc.is_empty() {
+            println!(
+                "  {:<8} 0x{:016x}-0x{:016x} ({}) {}",
+                label, r.start, r.end, size_str, r.perms,
+            );
+        } else {
+            println!(
+                "  {:<8} 0x{:016x}-0x{:016x} ({}) {} {}",
+                label, r.start, r.end, size_str, r.perms, desc,
+            );
+        }
+    }
+}
+
+pub struct VmLocateInfo<'a> {
+    pub expr: String,
+    pub type_name: String,
+    pub storage_addr: Option<u64>,
+    pub storage_region: Option<&'a VmRegion>,
+    pub value_addr: Option<u64>,
+    pub value_region: Option<&'a VmRegion>,
+    pub is_pointer: bool,
+    pub is_null: bool,
+}
+
+pub fn print_vm_locate(info: &VmLocateInfo<'_>) {
+    println!("expr: {} ({})", info.expr, info.type_name);
+    if info.is_pointer {
+        println!("  storage:");
+        if let Some(addr) = info.storage_addr {
+            println!("    addr:   0x{:016x}", addr);
+            if let Some(region) = info.storage_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = addr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            }
+        }
+        println!("  value:");
+        if info.is_null {
+            println!("    ptr:    0x0 (NULL)");
+        } else if let Some(vaddr) = info.value_addr {
+            println!("    ptr:    0x{:016x}", vaddr);
+            if let Some(region) = info.value_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = vaddr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            } else {
+                println!("    region: <unknown>");
+            }
+        } else {
+            println!("    ptr:    <unavailable>");
+        }
+    } else {
+        println!("  object:");
+        if let Some(vaddr) = info.value_addr {
+            println!("    addr:   0x{:016x}", vaddr);
+            if let Some(region) = info.value_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = vaddr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            } else {
+                println!("    region: <unknown>");
+            }
+        } else {
+            println!("    addr:   <unavailable>");
+        }
+    }
 }
 
 #[cfg(test)]

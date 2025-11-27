@@ -1,9 +1,12 @@
 use super::follow;
 use super::printers::{
     print_breakpoint, print_locals, print_memory_body, print_memory_full, print_stopped,
+    print_vm_locate, print_vm_regions, VmLocateInfo,
 };
 use crate::mi::{MiSession, Result};
 use crate::types::{is_pointer_type, normalize_type_name, strip_pointer_suffix, TypeLayout};
+use crate::vm;
+use std::num::ParseIntError;
 
 pub enum CommandOutcome {
     Continue,
@@ -16,6 +19,32 @@ pub fn execute_command(
     rest: &str,
     session: &mut MiSession,
 ) -> Result<CommandOutcome> {
+    // Special-case vm parsing to catch invalid usages.
+    if cmd == "vm" {
+        let parts: Vec<_> = input.trim().split_whitespace().collect();
+        if parts.len() == 1 {
+            handle_vm(session);
+            return Ok(CommandOutcome::Continue);
+        }
+        if parts.len() >= 2 && parts[1] == "locate" {
+            if parts.len() >= 3 {
+                let expr = parts[2..].join(" ");
+                handle_vm_locate(&expr, session);
+            } else {
+                eprintln!(
+                    "invalid vm usage: '{}'\n  usage: vm\n         vm locate <expr>",
+                    input.trim()
+                );
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        eprintln!(
+            "invalid vm usage: '{}'\n  usage: vm\n         vm locate <expr>",
+            input.trim()
+        );
+        return Ok(CommandOutcome::Continue);
+    }
+
     match cmd {
         "quit" | "q" => return Ok(CommandOutcome::Quit),
         "help" => print_help(),
@@ -63,9 +92,109 @@ pub fn execute_command(
             Ok(loc) => print_stopped(&loc),
             Err(e) => eprintln!("continue error: {}", e),
         },
-        _ => println!("unknown command: '{}'", input),
+        _ => {
+            println!("unknown command: '{}'", input);
+        }
     }
     Ok(CommandOutcome::Continue)
+}
+
+fn handle_vm(session: &mut MiSession) {
+    let pid = match session.inferior_pid() {
+        Ok(pid) => pid,
+        Err(e) => {
+            eprintln!("vm: could not determine inferior pid: {}", e);
+            return;
+        }
+    };
+    match vm::read_proc_maps(pid) {
+        Ok(regions) => print_vm_regions(&regions),
+        Err(e) => eprintln!("vm: failed to read /proc/{}: {}", pid, e),
+    }
+}
+
+fn handle_vm_locate(sym: &str, session: &mut MiSession) {
+    let pid = match session.inferior_pid() {
+        Ok(pid) => pid,
+        Err(e) => {
+            eprintln!("vm locate: could not determine inferior pid: {}", e);
+            return;
+        }
+    };
+    let regions = match vm::read_proc_maps(pid) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("vm locate: failed to read /proc/{}: {}", pid, e);
+            return;
+        }
+    };
+
+    match resolve_vm_locate(session, sym, &regions) {
+        Ok(info) => print_vm_locate(&info),
+        Err(e) => eprintln!("vm locate: could not resolve '{}': {}", sym, e),
+    }
+}
+
+fn parse_address(s: &str) -> Result<u64> {
+    // Try hex first
+    if let Some(hex) = s.trim().strip_prefix("0x") {
+        return u64::from_str_radix(hex, 16).map_err(|e| e.into());
+    }
+    // Decimal fallback
+    s.trim()
+        .parse::<u64>()
+        .map_err(|e: ParseIntError| e.into())
+}
+
+fn resolve_vm_locate<'a>(
+    session: &mut MiSession,
+    expr: &str,
+    regions: &'a [vm::VmRegion],
+) -> Result<VmLocateInfo<'a>> {
+    let (expr_type, expr_value) = session.eval_expr_type_and_value(expr)?;
+    let is_ptr = is_pointer_type(&expr_type) && expr_value.trim().starts_with("0x");
+
+    if is_ptr {
+        let storage_addr = session.eval_address_of_expr(expr)?;
+        let storage_region = regions.iter().find(|r| r.contains(storage_addr));
+
+        let mut is_null = false;
+        let mut value_addr = None;
+        let mut value_region = None;
+        let val_trim = expr_value.trim();
+        if val_trim == "0x0" || val_trim == "0" {
+            is_null = true;
+        } else if val_trim.starts_with("0x") {
+            if let Ok(addr) = parse_address(val_trim) {
+                value_addr = Some(addr);
+                value_region = regions.iter().find(|r| r.contains(addr));
+            }
+        }
+
+        Ok(VmLocateInfo {
+            expr: expr.to_string(),
+            type_name: expr_type,
+            storage_addr: Some(storage_addr),
+            storage_region,
+            value_addr,
+            value_region,
+            is_pointer: true,
+            is_null,
+        })
+    } else {
+        let obj_addr = session.eval_address_of_expr(expr)?;
+        let obj_region = regions.iter().find(|r| r.contains(obj_addr));
+        Ok(VmLocateInfo {
+            expr: expr.to_string(),
+            type_name: expr_type,
+            storage_addr: None,
+            storage_region: None,
+            value_addr: Some(obj_addr),
+            value_region: obj_region,
+            is_pointer: false,
+            is_null: false,
+        })
+    }
 }
 
 fn handle_mem(rest: &str, session: &mut MiSession) {
@@ -232,14 +361,16 @@ fn print_layout(layout: &TypeLayout) {
 
 fn print_help() {
     println!("Commands:");
-    println!("  locals            - list locals in current frame");
-    println!("  mem <expr> [len]  - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
-    println!("  view <symbol>     - show type-based layout for symbol (struct/array) plus raw dump");
-    println!("  follow <sym> [d]  - follow pointer chain for symbol up to optional depth (default ~8)");
-    println!("  break <loc> | b   - set breakpoint (e.g. 'break main', 'b file.c:42')");
-    println!("  next | n          - execute next line (step over)");
-    println!("  step | s          - step into functions");
-    println!("  continue | c      - continue execution until next breakpoint");
-    println!("  help              - show this message");
-    println!("  quit | q          - exit");
+    println!("  locals                - list locals in current frame");
+    println!("  mem <expr> [len]      - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
+    println!("  view <symbol>         - show type-based layout for symbol (struct/array) plus raw dump");
+    println!("  follow <sym> [d]      - follow pointer chain for symbol up to optional depth (default ~8)");
+    println!("  vm                    - show process memory map from /proc/<pid>/maps");
+    println!("  vm locate <symbol>    - show which VM region contains the given symbol");
+    println!("  break <loc> | b       - set breakpoint (e.g. 'break main', 'b file.c:42')");
+    println!("  next | n              - execute next line (step over)");
+    println!("  step | s              - step into functions");
+    println!("  continue | c          - continue execution until next breakpoint");
+    println!("  help                  - show this message");
+    println!("  quit | q              - exit");
 }
