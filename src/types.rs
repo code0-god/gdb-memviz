@@ -11,6 +11,7 @@ pub enum TypeLayout {
         elem_type: String,
         elem_size: usize,
         len: usize,
+        #[allow(dead_code)]
         size: usize,
     },
     Struct {
@@ -202,4 +203,70 @@ pub fn find_pointer_field(layout: &TypeLayout) -> Option<&FieldLayout> {
 pub fn is_pointer_type(ty: &str) -> bool {
     let t = ty.trim();
     t.contains('*') && !t.contains('[') && !t.contains(']')
+}
+
+/// Strip trailing '*' characters and surrounding spaces from a pointer type name.
+pub fn strip_pointer_suffix(ty: &str) -> String {
+    let mut trimmed = ty.trim().to_string();
+    while trimmed.ends_with('*') {
+        trimmed.pop();
+    }
+    trimmed.trim().to_string()
+}
+
+/// Normalize pointer type spacing for display (e.g., "struct Node *" -> "struct Node*").
+pub fn normalize_pointer_type(ty: &str) -> String {
+    normalize_type_name(ty).replace(" *", "*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_type_name_removes_array_spaces() {
+        assert_eq!(normalize_type_name("int [5]"), "int[5]");
+        assert_eq!(normalize_type_name("struct Node *"), "struct Node *");
+    }
+
+    #[test]
+    fn base_type_size_matches_word_size_for_pointers() {
+        assert_eq!(base_type_size("int *", 8), 8);
+        assert_eq!(base_type_size("char", 4), 1);
+    }
+
+    #[test]
+    fn parse_ptype_handles_array() {
+        let text = "type = int [5]";
+        let layout = parse_ptype_output(text, 8, 4);
+        match layout {
+            TypeLayout::Array {
+                elem_size, len, ..
+            } => {
+                assert_eq!(elem_size, 4);
+                assert_eq!(len, 5);
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn parse_ptype_handles_struct() {
+        let text = r#"
+type = struct Node {
+    int id;
+    int count;
+    char name[16];
+    struct Node *next;
+}
+"#;
+        let layout = parse_ptype_output(text, 8, 4);
+        match layout {
+            TypeLayout::Struct { fields, size, .. } => {
+                assert_eq!(fields.len(), 4);
+                assert_eq!(size, 32);
+            }
+            _ => panic!("expected struct"),
+        }
+    }
 }
