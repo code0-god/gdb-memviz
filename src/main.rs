@@ -2,6 +2,7 @@
 mod interactive;
 mod mi;
 mod types;
+mod vm;
 
 use mi::{MiResponse, MiSession, Result};
 
@@ -65,6 +66,8 @@ fn main() -> Result<()> {
     println!("\n# break main and run");
     session.run_to_main()?;
     session.ensure_word_size();
+    session.ensure_arch();
+    session.ensure_endian();
     println!("Reached breakpoint at main. Type 'help' for commands.");
 
     interactive::repl(&mut session)?;

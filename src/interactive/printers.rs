@@ -1,5 +1,6 @@
-use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, StoppedLocation};
-use crate::types::normalize_type_name;
+use crate::mi::{BreakpointInfo, Endian, GlobalVar, LocalVar, MemoryDump, StoppedLocation};
+use crate::types::{normalize_pointer_type, normalize_type_name};
+use crate::vm::{classify_addr, VmLabel, VmRegion};
 use regex::Regex;
 
 pub fn print_locals(locals: &[LocalVar]) {
@@ -145,6 +146,300 @@ pub fn prettify_value(s: &str) -> String {
     s.to_string()
 }
 
+fn normalize_display_type(ty: &str) -> String {
+    if ty.contains('*') {
+        normalize_pointer_type(ty)
+    } else {
+        normalize_type_name(ty)
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_region_desc(region: &VmRegion) -> String {
+    if region.pathname == "[heap]" {
+        "(heap)".to_string()
+    } else if region.pathname == "[stack]" {
+        "(stack)".to_string()
+    } else {
+        region.pathname.clone()
+    }
+}
+
+pub fn print_vm_regions(regions: &[VmRegion]) {
+    println!("regions:");
+    for r in regions {
+        let label = match &r.label {
+            VmLabel::Text => "[text]",
+            VmLabel::Data => "[data]",
+            VmLabel::Heap => "[heap]",
+            VmLabel::Stack => "[stack]",
+            VmLabel::Lib => "[lib]",
+            VmLabel::Anonymous => "[anon]",
+            VmLabel::Other(_) => "[other]",
+        };
+        let size_str = format_size(r.size());
+        let desc = format_region_desc(r);
+
+        if desc.is_empty() {
+            println!(
+                "  {:<8} 0x{:016x}-0x{:016x} ({}) {}",
+                label, r.start, r.end, size_str, r.perms,
+            );
+        } else {
+            println!(
+                "  {:<8} 0x{:016x}-0x{:016x} ({}) {} {}",
+                label, r.start, r.end, size_str, r.perms, desc,
+            );
+        }
+    }
+}
+
+pub struct VmLocateInfo<'a> {
+    pub expr: String,
+    pub type_name: String,
+    pub storage_addr: Option<u64>,
+    pub storage_region: Option<&'a VmRegion>,
+    pub value_addr: Option<u64>,
+    pub value_region: Option<&'a VmRegion>,
+    pub is_pointer: bool,
+    pub is_null: bool,
+}
+
+pub fn print_vm_locate(info: &VmLocateInfo<'_>) {
+    println!("expr: {} ({})", info.expr, info.type_name);
+    if info.is_pointer {
+        println!("  storage:");
+        if let Some(addr) = info.storage_addr {
+            println!("    addr:   0x{:016x}", addr);
+            if let Some(region) = info.storage_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = addr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            }
+        }
+        println!("  value:");
+        if info.is_null {
+            println!("    ptr:    0x0 (NULL)");
+        } else if let Some(vaddr) = info.value_addr {
+            println!("    ptr:    0x{:016x}", vaddr);
+            if let Some(region) = info.value_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = vaddr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            } else {
+                println!("    region: <unknown>");
+            }
+        } else {
+            println!("    ptr:    <unavailable>");
+        }
+    } else {
+        println!("  object:");
+        if let Some(vaddr) = info.value_addr {
+            println!("    addr:   0x{:016x}", vaddr);
+            if let Some(region) = info.value_region {
+                let label = match &region.label {
+                    VmLabel::Text => "[text]",
+                    VmLabel::Data => "[data]",
+                    VmLabel::Heap => "[heap]",
+                    VmLabel::Stack => "[stack]",
+                    VmLabel::Lib => "[lib]",
+                    VmLabel::Anonymous => "[anon]",
+                    VmLabel::Other(_) => "[other]",
+                };
+                let desc = format_region_desc(region);
+                if desc.is_empty() {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {}",
+                        label, region.start, region.end, region.perms
+                    );
+                } else {
+                    println!(
+                        "    region: {} 0x{:016x}-0x{:016x} {} {}",
+                        label, region.start, region.end, region.perms, desc
+                    );
+                }
+                let offset = vaddr.saturating_sub(region.start);
+                println!("    offset: +0x{:x} from region base", offset);
+            } else {
+                println!("    region: <unknown>");
+            }
+        } else {
+            println!("    addr:   <unavailable>");
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn label_for_global(regions: Option<&[VmRegion]>, addr: u64) -> &'static str {
+    if let Some(rs) = regions {
+        classify_addr(rs, addr)
+    } else {
+        "[unknown]"
+    }
+}
+
+pub fn print_globals(globals: &[GlobalVar], _vm_regions: Option<&[VmRegion]>) {
+    if globals.is_empty() {
+        return;
+    }
+    for (idx, g) in globals.iter().enumerate() {
+        let value = prettify_value(&g.value);
+        let ty = normalize_display_type(&g.type_name);
+        println!("{}: {} {} = {}", idx, ty, g.name, value);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub type_name: String,
+    pub addr: u64,
+    pub target_label: Option<VmLabel>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeapObjectInfo {
+    pub via: String,
+    pub type_name: String,
+    pub addr: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionVarsSummary {
+    pub label: VmLabel,
+    pub globals: Vec<SymbolInfo>,
+    pub locals: Vec<SymbolInfo>,
+    pub heap_objects: Vec<HeapObjectInfo>,
+}
+
+pub fn print_vm_vars(summaries: &[RegionVarsSummary]) {
+    if summaries.is_empty() {
+        println!("vm vars: no data");
+        return;
+    }
+    println!("vm vars (by region):\n");
+
+    let label_str = |l: &VmLabel| match l {
+        VmLabel::Data => "data",
+        VmLabel::Stack => "stack",
+        VmLabel::Heap => "heap",
+        VmLabel::Text => "text",
+        VmLabel::Lib => "lib",
+        VmLabel::Anonymous => "anon",
+        VmLabel::Other(_) => "other",
+    };
+
+    let tgt_str = |l: &VmLabel| match l {
+        VmLabel::Data => "data",
+        VmLabel::Stack => "stack",
+        VmLabel::Heap => "heap",
+        VmLabel::Text => "text",
+        VmLabel::Lib => "lib",
+        VmLabel::Anonymous => "anon",
+        VmLabel::Other(_) => "other",
+    };
+
+    let mut items: Vec<&RegionVarsSummary> = summaries.iter().collect();
+    items.sort_by_key(|s| match s.label {
+        VmLabel::Data => 0,
+        VmLabel::Stack => 1,
+        VmLabel::Heap => 2,
+        VmLabel::Text => 3,
+        VmLabel::Lib => 4,
+        VmLabel::Anonymous => 5,
+        VmLabel::Other(_) => 6,
+    });
+
+    for rs in items {
+        println!("[{}]", label_str(&rs.label));
+
+        if !rs.globals.is_empty() {
+            println!("  globals:");
+            for g in &rs.globals {
+                let ty = normalize_display_type(&g.type_name);
+                println!("    - {:<16} {}", ty, g.name);
+            }
+        }
+
+        if !rs.locals.is_empty() {
+            println!("  locals:");
+            for l in &rs.locals {
+                let ty = normalize_display_type(&l.type_name);
+                if let Some(tgt) = &l.target_label {
+                    println!("    - {:<17} {:<12} -> {}", ty, l.name, tgt_str(tgt));
+                } else {
+                    println!("    - {:<17} {}", ty, l.name);
+                }
+            }
+        }
+
+        if !rs.heap_objects.is_empty() {
+            println!("  objects (reachable via pointers):");
+            for o in &rs.heap_objects {
+                let ty = normalize_display_type(&o.type_name);
+                println!("    - *{:<14} ({})", o.via, ty);
+            }
+        }
+
+        println!();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +449,12 @@ mod tests {
     fn prettify_value_collapses_repeats() {
         assert_eq!(prettify_value("'\\000' <repeats 3 times>"), "\\0 (x3)");
         assert_eq!(prettify_value("plain"), "plain");
+    }
+
+    #[test]
+    fn normalize_display_type_handles_pointers_and_arrays() {
+        assert_eq!(super::normalize_display_type("struct Node *"), "struct Node*");
+        assert_eq!(super::normalize_display_type("int [5]"), "int[5]");
     }
 
     #[test]
