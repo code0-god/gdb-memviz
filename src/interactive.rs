@@ -9,7 +9,7 @@ use std::io::{self, Write};
 pub fn repl(session: &mut MiSession) -> Result<()> {
     // Tiny read-eval-print loop: parse first token as command, rest as args, keep running
     // until EOF or quit.
-    println!("Commands: locals | mem <expr> [len] | view <symbol> | follow <symbol> [depth] | vm [locate <symbol>] | break <loc> | next | step | continue | help | quit");
+    println!("Commands: locals | globals | mem <expr> [len] | view <symbol> | follow <symbol> [depth] | vm [locate <symbol>] | break <loc> | next | step | continue | help | quit");
     let stdin = io::stdin();
     let mut line = String::new();
     loop {

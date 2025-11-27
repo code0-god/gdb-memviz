@@ -59,3 +59,11 @@ pub enum MiStatus {
     Error(String),
     Other(String),
 }
+
+#[derive(Debug, Clone)]
+pub struct GlobalVar {
+    pub name: String,
+    pub type_name: String,
+    pub value: String,
+    pub address: u64,
+}

@@ -6,7 +6,6 @@ use super::printers::{
 use crate::mi::{MiSession, Result};
 use crate::types::{is_pointer_type, normalize_type_name, strip_pointer_suffix, TypeLayout};
 use crate::vm;
-use std::num::ParseIntError;
 
 pub enum CommandOutcome {
     Continue,
@@ -19,6 +18,14 @@ pub fn execute_command(
     rest: &str,
     session: &mut MiSession,
 ) -> Result<CommandOutcome> {
+    if cmd == "globals" {
+        if !rest.is_empty() {
+            println!("usage: globals");
+        } else {
+            handle_globals(session);
+        }
+        return Ok(CommandOutcome::Continue);
+    }
     // Special-case vm parsing to catch invalid usages.
     if cmd == "vm" {
         let parts: Vec<_> = input.trim().split_whitespace().collect();
@@ -113,6 +120,27 @@ fn handle_vm(session: &mut MiSession) {
     }
 }
 
+fn handle_globals(session: &mut MiSession) {
+    let globals = match session.list_globals() {
+        Ok(gs) => gs,
+        Err(e) => {
+            eprintln!("globals: failed to list globals: {}", e);
+            return;
+        }
+    };
+    let vm_regions = match session.inferior_pid() {
+        Ok(pid) => match vm::read_proc_maps(pid) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("globals: failed to read /proc/{}: {}", pid, e);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    super::printers::print_globals(&globals, vm_regions.as_deref());
+}
+
 fn handle_vm_locate(sym: &str, session: &mut MiSession) {
     let pid = match session.inferior_pid() {
         Ok(pid) => pid,
@@ -135,48 +163,32 @@ fn handle_vm_locate(sym: &str, session: &mut MiSession) {
     }
 }
 
-fn parse_address(s: &str) -> Result<u64> {
-    // Try hex first
-    if let Some(hex) = s.trim().strip_prefix("0x") {
-        return u64::from_str_radix(hex, 16).map_err(|e| e.into());
-    }
-    // Decimal fallback
-    s.trim()
-        .parse::<u64>()
-        .map_err(|e: ParseIntError| e.into())
-}
-
 fn resolve_vm_locate<'a>(
     session: &mut MiSession,
     expr: &str,
     regions: &'a [vm::VmRegion],
 ) -> Result<VmLocateInfo<'a>> {
-    let (expr_type, expr_value) = session.eval_expr_type_and_value(expr)?;
-    let is_ptr = is_pointer_type(&expr_type) && expr_value.trim().starts_with("0x");
+    let (expr_type, _expr_value) = session.eval_expr_type_and_value(expr)?;
+    let is_ptr = is_pointer_type(&expr_type);
 
     if is_ptr {
         let storage_addr = session.eval_address_of_expr(expr)?;
         let storage_region = regions.iter().find(|r| r.contains(storage_addr));
 
-        let mut is_null = false;
-        let mut value_addr = None;
-        let mut value_region = None;
-        let val_trim = expr_value.trim();
-        if val_trim == "0x0" || val_trim == "0" {
-            is_null = true;
-        } else if val_trim.starts_with("0x") {
-            if let Ok(addr) = parse_address(val_trim) {
-                value_addr = Some(addr);
-                value_region = regions.iter().find(|r| r.contains(addr));
-            }
-        }
+        let ptr_val = session.eval_expr_u64(expr).unwrap_or(0);
+        let is_null = ptr_val == 0;
+        let value_region = if is_null {
+            None
+        } else {
+            regions.iter().find(|r| r.contains(ptr_val))
+        };
 
         Ok(VmLocateInfo {
             expr: expr.to_string(),
             type_name: expr_type,
             storage_addr: Some(storage_addr),
             storage_region,
-            value_addr,
+            value_addr: if is_null { None } else { Some(ptr_val) },
             value_region,
             is_pointer: true,
             is_null,
@@ -230,7 +242,7 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
             return Ok(());
         }
     };
-    let addr = match session.evaluate_expression(&format!("&{}", symbol)) {
+    let addr = match session.eval_address_of_expr(symbol) {
         Ok(v) => v,
         Err(e) => {
             println!("view: address for '{}' not found: {}", symbol, e);
@@ -255,7 +267,7 @@ fn handle_view(symbol: &str, session: &mut MiSession) -> Result<()> {
         .map(|t| normalize_type_name(t))
         .unwrap_or_else(|| normalize_type_name(&type_name(&layout)));
 
-    println!("symbol: {} ({}) @ {}", symbol, type_display, addr);
+    println!("symbol: {} ({}) @ 0x{:016x}", symbol, type_display, addr);
     println!("size: {} bytes (word size = {})", size, session.word_size);
     let endian_str = match session.endian {
         crate::mi::Endian::Little => "little-endian",
@@ -362,6 +374,7 @@ fn print_layout(layout: &TypeLayout) {
 fn print_help() {
     println!("Commands:");
     println!("  locals                - list locals in current frame");
+    println!("  globals               - list global/static variables");
     println!("  mem <expr> [len]      - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
     println!("  view <symbol>         - show type-based layout for symbol (struct/array) plus raw dump");
     println!("  follow <sym> [d]      - follow pointer chain for symbol up to optional depth (default ~8)");

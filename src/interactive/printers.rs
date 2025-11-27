@@ -1,5 +1,5 @@
-use crate::mi::{BreakpointInfo, Endian, LocalVar, MemoryDump, StoppedLocation};
-use crate::vm::{VmLabel, VmRegion};
+use crate::mi::{BreakpointInfo, Endian, GlobalVar, LocalVar, MemoryDump, StoppedLocation};
+use crate::vm::{classify_addr, VmLabel, VmRegion};
 use crate::types::normalize_type_name;
 use regex::Regex;
 
@@ -313,6 +313,25 @@ pub fn print_vm_locate(info: &VmLocateInfo<'_>) {
         } else {
             println!("    addr:   <unavailable>");
         }
+    }
+}
+
+#[allow(dead_code)]
+fn label_for_global(regions: Option<&[VmRegion]>, addr: u64) -> &'static str {
+    if let Some(rs) = regions {
+        classify_addr(rs, addr)
+    } else {
+        "[unknown]"
+    }
+}
+
+pub fn print_globals(globals: &[GlobalVar], _vm_regions: Option<&[VmRegion]>) {
+    if globals.is_empty() {
+        return;
+    }
+    for (idx, g) in globals.iter().enumerate() {
+        let value = prettify_value(&g.value);
+        println!("{}: {} {} = {}", idx, g.type_name, g.name, value);
     }
 }
 

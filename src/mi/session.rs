@@ -1,5 +1,6 @@
 use crate::mi::models::{
-    BreakpointInfo, Endian, LocalVar, MemoryDump, MiResponse, MiStatus, Result, StoppedLocation,
+    BreakpointInfo, Endian, GlobalVar, LocalVar, MemoryDump, MiResponse, MiStatus, Result,
+    StoppedLocation,
 };
 use crate::mi::parser::{
     bytes_to_u64, guess_endian_from_arch, mi_escape, parse_addr_field, parse_breakpoint,
@@ -22,6 +23,7 @@ pub struct MiSession {
     word_known: bool,
     pub endian: Endian,
     pub arch: Option<String>,
+    target_hint: String,
 }
 
 impl MiSession {
@@ -64,6 +66,11 @@ impl MiSession {
             word_known: false,
             endian: Endian::Unknown,
             arch: None,
+            target_hint: std::path::Path::new(target)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
         })
     }
 
@@ -308,6 +315,73 @@ impl MiSession {
         Err("could not determine inferior pid from 'info proc'".into())
     }
 
+    /// List global variables visible to gdb (console-based parsing).
+    pub fn list_globals(&mut self) -> Result<Vec<GlobalVar>> {
+        let cmd = "-interpreter-exec console \"info variables\"";
+        let resp = self.exec_command(cmd)?;
+        let mut text = String::new();
+        text.push_str(&resp.result.replace("\\n", "\n").replace("\\t", "\t"));
+        text.push('\n');
+        for line in &resp.oob {
+            let cleaned = line
+                .trim_start_matches("~\"")
+                .trim_end_matches('"')
+                .replace("\\n", "\n")
+                .replace("\\t", "\t");
+            text.push_str(&cleaned);
+            text.push('\n');
+        }
+
+        let mut globals = Vec::new();
+        let mut in_file_block = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("Non-debugging symbols") {
+                break; // stop before libc etc.
+            }
+            if trimmed.starts_with("All defined variables") {
+                continue;
+            }
+            if trimmed.starts_with("File ") || trimmed.ends_with(':') {
+                let header = trimmed
+                    .trim_start_matches("File ")
+                    .trim_end_matches(':')
+                    .trim();
+                if !self.target_hint.is_empty() && !header.contains(&self.target_hint) {
+                    in_file_block = false;
+                } else {
+                    in_file_block = true;
+                }
+                continue;
+            }
+            if !in_file_block {
+                continue;
+            }
+            if !trimmed.contains(';') {
+                continue;
+            }
+            if trimmed.contains('(') {
+                continue; // skip functions
+            }
+            if let Some((type_name, name)) = parse_global_decl(trimmed) {
+                let val = self
+                    .evaluate_expression(&name)
+                    .unwrap_or_else(|_| "<unavailable>".to_string());
+                let addr = self.eval_address_of_expr(&name).unwrap_or(0);
+                globals.push(GlobalVar {
+                    name: name.to_string(),
+                    type_name: type_name.to_string(),
+                    value: val,
+                    address: addr,
+                });
+            }
+        }
+        Ok(globals)
+    }
+
     /// Evaluate expression and return (type, value) strings.
     pub fn eval_expr_type_and_value(&mut self, expr: &str) -> Result<(String, String)> {
         let cmd = format!("-data-evaluate-expression {}", mi_escape(expr));
@@ -325,17 +399,38 @@ impl MiSession {
         Ok((ty, value))
     }
 
-    /// Evaluate address of an expression and return as u64.
-    pub fn eval_address_of_expr(&mut self, expr: &str) -> Result<u64> {
-        let addr_expr = format!("&({})", expr);
-        let cmd = format!("-data-evaluate-expression {}", mi_escape(&addr_expr));
+    /// Evaluate arbitrary expression and interpret the result as u64.
+    pub fn eval_expr_u64(&mut self, expr: &str) -> Result<u64> {
+        let cmd = format!("-data-evaluate-expression {}", mi_escape(expr));
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {
             return Err(format!("{}", msg).into());
         }
-        let raw = parse_value_field(&resp.result).ok_or("address not found in MI response")?;
+        let raw = parse_value_field(&resp.result).ok_or("value field not found in MI response")?;
+        // Try to scrape an address or number from the value field first.
+        if let Some(addr) = parse_address_str(&raw) {
+            return Ok(addr);
+        }
+        if let Some(first) = raw.split_whitespace().next() {
+            if let Some(addr) = parse_address_str(first) {
+                return Ok(addr);
+            }
+            if let Ok(v) = parse_usize(first) {
+                return Ok(v as u64);
+            }
+        }
+        // As a fallback, inspect the entire MI result.
+        if let Some(addr) = parse_address_str(&resp.result) {
+            return Ok(addr);
+        }
         let val = parse_usize(&raw)?;
         Ok(val as u64)
+    }
+
+    /// Evaluate address of an expression and return as u64.
+    pub fn eval_address_of_expr(&mut self, expr: &str) -> Result<u64> {
+        let addr_expr = format!("&({})", expr);
+        self.eval_expr_u64(&addr_expr)
     }
 
     /// Higher-level memory dump that respects sizeof(expr) and word size.
@@ -343,8 +438,8 @@ impl MiSession {
         self.ensure_word_size();
         self.ensure_endian();
 
-        let addr_expr = format!("&{}", expr);
-        let addr = self.evaluate_expression(&addr_expr)?;
+        let addr_u64 = self.eval_address_of_expr(expr)?;
+        let addr_str = format!("0x{:x}", addr_u64);
 
         let mut requested = match override_len {
             Some(len) => len,
@@ -359,7 +454,7 @@ impl MiSession {
             truncated_from = Some(requested);
             requested = MAX_DUMP_BYTES;
         }
-        let (addr, bytes) = self.read_memory_bytes(&addr, requested)?;
+        let (addr, bytes) = self.read_memory_bytes(&addr_str, requested)?;
         // If endian is still unknown, use arch hint or default little.
         if matches!(self.endian, Endian::Unknown) {
             if let Some(arch) = &self.arch {
@@ -615,4 +710,58 @@ impl MiSession {
         }
         Ok(lines)
     }
+}
+
+fn parse_global_decl(line: &str) -> Option<(String, String)> {
+    // Examples:
+    // "13:\tint g_counter;"
+    // "char g_message[16];"
+    let mut cleaned = line.trim();
+    // Drop leading "<digits>:" prefix if present.
+    if let Some(colon_idx) = cleaned.find(':') {
+        if cleaned[..colon_idx].chars().all(|c| c.is_ascii_digit()) {
+            cleaned = cleaned[colon_idx + 1..].trim();
+        }
+    }
+    cleaned = cleaned.trim_end_matches(';').trim();
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut name = parts.last()?.trim().to_string();
+    if let Some(idx) = name.find('[') {
+        name = name[..idx].trim().to_string();
+    }
+    while name.starts_with('*') {
+        name.remove(0);
+    }
+    let type_name = parts[..parts.len() - 1].join(" ");
+    if type_name.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((type_name, name))
+}
+
+fn parse_address_str(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if let Some(hex) = trimmed.strip_prefix("0x") {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    if let Some(idx) = trimmed.find("0x") {
+        let rest = &trimmed[idx + 2..];
+        let hex_part: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if !hex_part.is_empty() {
+            return u64::from_str_radix(&hex_part, 16).ok();
+        }
+    }
+    if let Ok(re) = regex::Regex::new(r"0x[0-9a-fA-F]+") {
+        if let Some(mat) = re.find(trimmed) {
+            let hex = mat.as_str().trim_start_matches("0x");
+            return u64::from_str_radix(hex, 16).ok();
+        }
+    }
+    None
 }
