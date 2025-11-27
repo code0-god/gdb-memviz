@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VmLabel {
     Text,       // executable text/code
     Data,       // data/bss

@@ -1,6 +1,6 @@
 use crate::mi::{BreakpointInfo, Endian, GlobalVar, LocalVar, MemoryDump, StoppedLocation};
+use crate::types::{normalize_pointer_type, normalize_type_name};
 use crate::vm::{classify_addr, VmLabel, VmRegion};
-use crate::types::normalize_type_name;
 use regex::Regex;
 
 pub fn print_locals(locals: &[LocalVar]) {
@@ -144,6 +144,14 @@ pub fn prettify_value(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn normalize_display_type(ty: &str) -> String {
+    if ty.contains('*') {
+        normalize_pointer_type(ty)
+    } else {
+        normalize_type_name(ty)
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -331,7 +339,104 @@ pub fn print_globals(globals: &[GlobalVar], _vm_regions: Option<&[VmRegion]>) {
     }
     for (idx, g) in globals.iter().enumerate() {
         let value = prettify_value(&g.value);
-        println!("{}: {} {} = {}", idx, g.type_name, g.name, value);
+        let ty = normalize_display_type(&g.type_name);
+        println!("{}: {} {} = {}", idx, ty, g.name, value);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub type_name: String,
+    pub addr: u64,
+    pub target_label: Option<VmLabel>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeapObjectInfo {
+    pub via: String,
+    pub type_name: String,
+    pub addr: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionVarsSummary {
+    pub label: VmLabel,
+    pub globals: Vec<SymbolInfo>,
+    pub locals: Vec<SymbolInfo>,
+    pub heap_objects: Vec<HeapObjectInfo>,
+}
+
+pub fn print_vm_vars(summaries: &[RegionVarsSummary]) {
+    if summaries.is_empty() {
+        println!("vm vars: no data");
+        return;
+    }
+    println!("vm vars (by region):\n");
+
+    let label_str = |l: &VmLabel| match l {
+        VmLabel::Data => "data",
+        VmLabel::Stack => "stack",
+        VmLabel::Heap => "heap",
+        VmLabel::Text => "text",
+        VmLabel::Lib => "lib",
+        VmLabel::Anonymous => "anon",
+        VmLabel::Other(_) => "other",
+    };
+
+    let tgt_str = |l: &VmLabel| match l {
+        VmLabel::Data => "data",
+        VmLabel::Stack => "stack",
+        VmLabel::Heap => "heap",
+        VmLabel::Text => "text",
+        VmLabel::Lib => "lib",
+        VmLabel::Anonymous => "anon",
+        VmLabel::Other(_) => "other",
+    };
+
+    let mut items: Vec<&RegionVarsSummary> = summaries.iter().collect();
+    items.sort_by_key(|s| match s.label {
+        VmLabel::Data => 0,
+        VmLabel::Stack => 1,
+        VmLabel::Heap => 2,
+        VmLabel::Text => 3,
+        VmLabel::Lib => 4,
+        VmLabel::Anonymous => 5,
+        VmLabel::Other(_) => 6,
+    });
+
+    for rs in items {
+        println!("[{}]", label_str(&rs.label));
+
+        if !rs.globals.is_empty() {
+            println!("  globals:");
+            for g in &rs.globals {
+                let ty = normalize_display_type(&g.type_name);
+                println!("    - {:<16} {}", ty, g.name);
+            }
+        }
+
+        if !rs.locals.is_empty() {
+            println!("  locals:");
+            for l in &rs.locals {
+                let ty = normalize_display_type(&l.type_name);
+                if let Some(tgt) = &l.target_label {
+                    println!("    - {:<17} {:<12} -> {}", ty, l.name, tgt_str(tgt));
+                } else {
+                    println!("    - {:<17} {}", ty, l.name);
+                }
+            }
+        }
+
+        if !rs.heap_objects.is_empty() {
+            println!("  objects (reachable via pointers):");
+            for o in &rs.heap_objects {
+                let ty = normalize_display_type(&o.type_name);
+                println!("    - *{:<14} ({})", o.via, ty);
+            }
+        }
+
+        println!();
     }
 }
 
@@ -344,6 +449,12 @@ mod tests {
     fn prettify_value_collapses_repeats() {
         assert_eq!(prettify_value("'\\000' <repeats 3 times>"), "\\0 (x3)");
         assert_eq!(prettify_value("plain"), "plain");
+    }
+
+    #[test]
+    fn normalize_display_type_handles_pointers_and_arrays() {
+        assert_eq!(super::normalize_display_type("struct Node *"), "struct Node*");
+        assert_eq!(super::normalize_display_type("int [5]"), "int[5]");
     }
 
     #[test]

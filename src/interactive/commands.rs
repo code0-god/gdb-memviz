@@ -1,11 +1,13 @@
 use super::follow;
 use super::printers::{
     print_breakpoint, print_locals, print_memory_body, print_memory_full, print_stopped,
-    print_vm_locate, print_vm_regions, VmLocateInfo,
+    print_vm_locate, print_vm_regions, print_vm_vars, HeapObjectInfo, RegionVarsSummary,
+    SymbolInfo, VmLocateInfo,
 };
 use crate::mi::{MiSession, Result};
 use crate::types::{is_pointer_type, normalize_type_name, strip_pointer_suffix, TypeLayout};
-use crate::vm;
+use crate::vm::{self, VmLabel};
+use std::collections::HashMap;
 
 pub enum CommandOutcome {
     Continue,
@@ -33,20 +35,24 @@ pub fn execute_command(
             handle_vm(session);
             return Ok(CommandOutcome::Continue);
         }
+        if parts.len() == 2 && parts[1] == "vars" {
+            handle_vm_vars(session);
+            return Ok(CommandOutcome::Continue);
+        }
         if parts.len() >= 2 && parts[1] == "locate" {
             if parts.len() >= 3 {
                 let expr = parts[2..].join(" ");
                 handle_vm_locate(&expr, session);
             } else {
                 eprintln!(
-                    "invalid vm usage: '{}'\n  usage: vm\n         vm locate <expr>",
+                    "invalid vm usage: '{}'\n  usage: vm\n         vm vars\n         vm locate <expr>",
                     input.trim()
                 );
             }
             return Ok(CommandOutcome::Continue);
         }
         eprintln!(
-            "invalid vm usage: '{}'\n  usage: vm\n         vm locate <expr>",
+            "invalid vm usage: '{}'\n  usage: vm\n         vm vars\n         vm locate <expr>",
             input.trim()
         );
         return Ok(CommandOutcome::Continue);
@@ -118,6 +124,110 @@ fn handle_vm(session: &mut MiSession) {
         Ok(regions) => print_vm_regions(&regions),
         Err(e) => eprintln!("vm: failed to read /proc/{}: {}", pid, e),
     }
+}
+
+fn handle_vm_vars(session: &mut MiSession) {
+    let pid = match session.inferior_pid() {
+        Ok(pid) => pid,
+        Err(e) => {
+            eprintln!("vm vars: could not determine inferior pid: {}", e);
+            return;
+        }
+    };
+    let regions = match vm::read_proc_maps(pid) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("vm vars: failed to read /proc/{}: {}", pid, e);
+            return;
+        }
+    };
+    let locals = match session.list_locals() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("vm vars: failed to list locals: {}", e);
+            return;
+        }
+    };
+    let globals = match session.list_globals() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("vm vars: failed to list globals: {}", e);
+            return;
+        }
+    };
+
+    let mut summaries: HashMap<VmLabel, RegionVarsSummary> = HashMap::new();
+
+    let classify = |addr: u64| regions.iter().find(|r| r.contains(addr)).map(|r| r.label.clone());
+
+    fn get_summary<'a>(
+        map: &'a mut HashMap<VmLabel, RegionVarsSummary>,
+        label: VmLabel,
+    ) -> &'a mut RegionVarsSummary {
+        map.entry(label.clone())
+            .or_insert_with(|| RegionVarsSummary {
+                label,
+                globals: Vec::new(),
+                locals: Vec::new(),
+                heap_objects: Vec::new(),
+            })
+    }
+
+    // Globals
+    for g in &globals {
+        if let Some(label) = classify(g.address) {
+            let summary = get_summary(&mut summaries, label);
+            summary.globals.push(SymbolInfo {
+                name: g.name.clone(),
+                type_name: g.type_name.clone(),
+                addr: g.address,
+                target_label: None,
+            });
+        }
+    }
+
+    // Locals and pointer targets
+    for l in &locals {
+        let ty = l.ty.clone().unwrap_or_else(|| "unknown".to_string());
+        let addr = session.eval_address_of_expr(&l.name).unwrap_or(0);
+        if let Some(label) = classify(addr) {
+            let mut target_label = None;
+            if is_pointer_type(&ty) {
+                let ptr_val = session.eval_expr_u64(&l.name).unwrap_or(0);
+                if ptr_val != 0 {
+                    target_label = classify(ptr_val);
+                    if let Some(VmLabel::Heap) = target_label.clone() {
+                        let pointee = strip_pointer_suffix(&ty);
+                        let heap_summary = get_summary(&mut summaries, VmLabel::Heap);
+                        heap_summary.heap_objects.push(HeapObjectInfo {
+                            via: l.name.clone(),
+                            type_name: pointee,
+                            addr: ptr_val,
+                        });
+                    }
+                }
+            }
+            let summary = get_summary(&mut summaries, label);
+            summary.locals.push(SymbolInfo {
+                name: l.name.clone(),
+                type_name: ty,
+                addr,
+                target_label,
+            });
+        }
+    }
+
+    let mut ordered: Vec<RegionVarsSummary> = summaries.into_values().collect();
+    ordered.sort_by_key(|s| match s.label {
+        VmLabel::Data => 0,
+        VmLabel::Stack => 1,
+        VmLabel::Heap => 2,
+        VmLabel::Text => 3,
+        VmLabel::Lib => 4,
+        VmLabel::Anonymous => 5,
+        VmLabel::Other(_) => 6,
+    });
+    print_vm_vars(&ordered);
 }
 
 fn handle_globals(session: &mut MiSession) {
@@ -379,6 +489,7 @@ fn print_help() {
     println!("  view <symbol>         - show type-based layout for symbol (struct/array) plus raw dump");
     println!("  follow <sym> [d]      - follow pointer chain for symbol up to optional depth (default ~8)");
     println!("  vm                    - show process memory map from /proc/<pid>/maps");
+    println!("  vm vars               - show locals/globals grouped by VM region");
     println!("  vm locate <symbol>    - show which VM region contains the given symbol");
     println!("  break <loc> | b       - set breakpoint (e.g. 'break main', 'b file.c:42')");
     println!("  next | n              - execute next line (step over)");
