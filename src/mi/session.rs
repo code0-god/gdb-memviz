@@ -8,10 +8,11 @@ use crate::mi::parser::{
     parse_endian, parse_locals, parse_memory_contents, parse_status, parse_stopped,
     parse_symbol_info_variables, parse_type_field, parse_usize, parse_value_field, parse_var_name,
 };
-use crate::symbols::{GlobalVarInfo, GlobalVarWithValue, SymbolIndex};
+use crate::symbols::{GlobalVarInfo, GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::types::{parse_ptype_output, TypeLayout};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Instant;
 
 const MAX_DUMP_BYTES: usize = 512;
 const VAR_CREATE_AUTO: &str = "-";
@@ -27,11 +28,20 @@ pub struct MiSession {
     pub endian: Endian,
     pub arch: Option<String>,
     target_hint: String,
+    target_basename: Option<String>,
+    symbol_index_mode: SymbolIndexMode,
     pub symbol_index: Option<SymbolIndex>,
 }
 
 impl MiSession {
-    pub fn start(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<Self> {
+    pub fn start(
+        gdb_bin: &str,
+        target: &str,
+        args: &[String],
+        verbose: bool,
+        symbol_index_mode: SymbolIndexMode,
+        target_basename: Option<String>,
+    ) -> Result<Self> {
         // Spawn gdb in MI mode (`-i=mi`) with quiet banner. Target args are passed as-is.
         let mut cmd = Command::new(gdb_bin);
         cmd.arg("-q").arg("-i=mi").arg("--args").arg(target);
@@ -75,6 +85,8 @@ impl MiSession {
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            target_basename,
+            symbol_index_mode,
             symbol_index: None,
         })
     }
@@ -328,33 +340,100 @@ impl MiSession {
     }
 
     /// Build and cache symbol index from gdb.
-    pub fn build_symbol_index(&mut self) -> Result<SymbolIndex> {
-        let resp = self.exec_command("-symbol-info-variables")?;
-        log_debug(&format!("[mi<-sym] {}", resp.result));
-        let parsed = parse_symbol_info_variables(&resp.result);
-        let mut index = SymbolIndex::default();
-        for v in parsed.variables {
-            if v.is_local || v.is_argument {
-                continue;
+    pub fn build_symbol_index(
+        &mut self,
+        mode: SymbolIndexMode,
+        target_basename: Option<&str>,
+    ) -> Result<SymbolIndex> {
+        self.symbol_index_mode = mode;
+        if matches!(mode, SymbolIndexMode::None) {
+            log_debug("[sym] build_symbol_index: mode=None, skipping");
+            let idx = SymbolIndex::default();
+            self.symbol_index = Some(idx.clone());
+            return Ok(idx);
+        }
+
+        let cmd = match mode {
+            SymbolIndexMode::DebugOnly => "-symbol-info-variables",
+            SymbolIndexMode::DebugAndNonDebug => "-symbol-info-variables --include-nondebug",
+            SymbolIndexMode::None => unreachable!(),
+        };
+
+        let t0 = Instant::now();
+        let resp = self.exec_command(cmd)?;
+        let t1 = Instant::now();
+
+        match resp.status.clone() {
+            MiStatus::Error(msg) => {
+                log_debug(&format!("[mi<-sym] {} failed: {}", cmd, msg));
+                return Err(format!("symbol-info-variables failed: {}", msg).into());
             }
-            let basename = v
-                .file
+            _ => {
+                log_debug(&format!(
+                    "[mi<-sym] {} done in {} ms",
+                    cmd,
+                    (t1 - t0).as_millis()
+                ));
+            }
+        }
+
+        let raw_for_parse = format!("{} {}", resp.result, resp.oob.join(" "));
+        let parsed = parse_symbol_info_variables(
+            &raw_for_parse,
+            target_basename.or(self.target_basename.as_deref()),
+        );
+        let t2 = Instant::now();
+        log_debug(&format!(
+            "[sym] parse_symbol_info_variables in {} ms",
+            (t2 - t1).as_millis()
+        ));
+
+        let mut index = SymbolIndex::default();
+        for group in parsed.debug.iter().chain(parsed.nondebug.iter()) {
+            let file = group.fullname.clone().or_else(|| group.filename.clone());
+            let basename = file
                 .as_deref()
                 .and_then(|p| std::path::Path::new(p).file_name())
                 .and_then(|os| os.to_str())
                 .map(|s| s.to_owned());
-            let info = GlobalVarInfo {
-                name: v.name,
-                type_name: v.type_name,
-                file: v.file,
-                line: v.line,
-                is_static: v.is_static,
-                is_function_scope: false,
-            };
-            if let Some(b) = basename {
-                index.globals_by_file.entry(b).or_default().push(info);
+
+            if let Some(base) = basename {
+                for sym in &group.symbols {
+                    let info = GlobalVarInfo {
+                        name: sym.name.clone(),
+                        type_name: sym.type_name.clone(),
+                        file: file.clone(),
+                        line: sym.line,
+                        is_static: sym
+                            .description
+                            .as_deref()
+                            .map(|d| d.contains("static"))
+                            .unwrap_or(false),
+                        is_function_scope: false,
+                    };
+                    index.globals_by_file.entry(base.clone()).or_default().push(info);
+                }
             }
         }
+
+        let t3 = Instant::now();
+        let total: usize = index
+            .globals_by_file
+            .values()
+            .map(|v| v.len())
+            .sum();
+
+        log_debug(&format!(
+            "[sym] build_symbol_index: debug_files={} nondebug_files={} globals_total={} index_build={} ms",
+            parsed.debug.len(),
+            parsed.nondebug.len(),
+            total,
+            (t3 - t2).as_millis()
+        ));
+        for (file, vars) in &index.globals_by_file {
+            log_debug(&format!("[sym] file={} globals={}", file, vars.len()));
+        }
+
         self.symbol_index = Some(index.clone());
         Ok(index)
     }
@@ -363,7 +442,7 @@ impl MiSession {
     pub fn list_globals(&mut self, filter_file: Option<&str>) -> Result<Vec<GlobalVar>> {
         let index = match self.symbol_index.clone() {
             Some(idx) => idx,
-            None => self.build_symbol_index()?,
+            None => self.build_symbol_index(self.symbol_index_mode, None)?,
         };
         let vals = self.list_globals_from_index(&index, filter_file)?;
         let globals = vals
@@ -388,6 +467,10 @@ impl MiSession {
             None => return Ok(Vec::new()),
         };
         let Some(entries) = index.globals_by_file.get(file) else {
+            log_debug(&format!(
+                "[sym] list_globals_from_index: basename={} not found",
+                file
+            ));
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -402,6 +485,11 @@ impl MiSession {
                 address: addr,
             });
         }
+        log_debug(&format!(
+            "[sym] list_globals_from_index: basename={} -> {} entries",
+            file,
+            out.len()
+        ));
         Ok(out)
     }
 

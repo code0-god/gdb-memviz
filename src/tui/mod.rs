@@ -1,5 +1,6 @@
 use crate::logger::log_debug;
 use crate::mi::Result;
+use crate::symbols::SymbolIndexMode;
 use crossterm::{
     event::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -25,9 +26,23 @@ use crate::mi::MiSession;
 use state::{AppState, Focus, PaneNode, SplitDir, SymbolSection};
 use std::path::PathBuf;
 
-pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<()> {
+pub fn run_tui(
+    gdb_bin: &str,
+    target: &str,
+    args: &[String],
+    verbose: bool,
+    symbol_index_mode: SymbolIndexMode,
+    target_basename: Option<String>,
+) -> Result<()> {
     // Initialize gdb session
-    let mut session = MiSession::start(gdb_bin, target, args, verbose)?;
+    let mut session = MiSession::start(
+        gdb_bin,
+        target,
+        args,
+        verbose,
+        symbol_index_mode,
+        target_basename.clone(),
+    )?;
     session.drain_initial_output()?;
 
     // Run to main and initialize session state
@@ -35,6 +50,16 @@ pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> R
     session.ensure_word_size();
     session.ensure_arch();
     session.ensure_endian();
+
+    // Build symbol index once (best effort)
+    let symbol_index =
+        match session.build_symbol_index(symbol_index_mode, target_basename.as_deref()) {
+        Ok(idx) => Some(idx),
+        Err(e) => {
+            log_debug(&format!("[sym] build_symbol_index failed: {:?}", e));
+            None
+        }
+    };
 
     // Setup terminal
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -47,11 +72,17 @@ pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> R
     let keyboard_enhanced = enable_keyboard_enhancement(terminal.backend_mut());
 
     // Create app state with session
-    let mut app = AppState::new(session, PathBuf::from(target), verbose);
+    let mut app = AppState::new(
+        session,
+        PathBuf::from(target),
+        symbol_index,
+        symbol_index_mode,
+        verbose,
+    );
 
     // Refresh after initial stop at main
     if let Err(e) = app.refresh_after_stop(Some(&initial_stop)) {
-        eprintln!("[tui] refresh_after_stop error: {:?}", e);
+        log_debug(&format!("[tui] refresh_after_stop error: {:?}", e));
     }
 
     let result = event_loop(&mut terminal, &mut app);

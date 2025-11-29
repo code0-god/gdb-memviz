@@ -72,16 +72,20 @@ pub struct GlobalVar {
 #[derive(Debug, Clone)]
 pub struct MiSymbolVariable {
     pub name: String,
-    pub kind: Option<String>,
     pub type_name: Option<String>,
-    pub file: Option<String>,
     pub line: Option<u32>,
-    pub is_local: bool,
-    pub is_argument: bool,
-    pub is_static: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MiSymbolFileGroup {
+    pub filename: Option<String>,
+    pub fullname: Option<String>,
+    pub symbols: Vec<MiSymbolVariable>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct MiSymbolInfoVariables {
-    pub variables: Vec<MiSymbolVariable>,
+    pub debug: Vec<MiSymbolFileGroup>,
+    pub nondebug: Vec<MiSymbolFileGroup>,
 }

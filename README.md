@@ -1,5 +1,18 @@
 # gdb-memviz
-gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시각화하려는 실험용 도구입니다. 현재는 **Phase 2 입구** 정도로, 로컬 변수 + 심볼 단위 메모리 덤프와 타입 기반 레이아웃(`view`)을 지원하며 기본 디버깅 조작(`break/next/step/continue`)도 포함합니다.
+gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시각화하려는 실험용 도구입니다. 현재는 **Phase 2 입구** 정도로, 로컬 변수 + 심볼 단위 메모리 덤프와 타입 기반 레이아웃(`view`)을 지원하며 기본 디버깅 조작(`break/next/step/continue`)도 포함합니다. 최근 변경 사항:
+
+- `--symbol-index-mode` 추가: `debug-only`(기본) / `debug-and-nondebug` / `none`
+- 단일 소스(.c/.cc/.cpp/.cxx) 모드에서는 심볼 인덱스 파싱 시 대상 basename만 파싱하도록 최적화 (glibc 디버그 심볼 대량 파싱을 회피)
+- `--log-file`만 지정해도 로그가 항상 기록됨 (`--verbose`는 stdout 미러용)
+
+## 실행 옵션 요약
+- TUI + 디버그 심볼만(기본, 빠름): `cargo run -- --tui --symbol-index-mode debug-only --log-file perf.log examples/sample.c`
+- TUI + 디버그/논디버그 전체(느림): `cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c`
+- TUI + 심볼 인덱스 스킵: `cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c`
+- 단일 소스 자동 빌드 후 실행(기본 debug-only): `cargo run -- --tui examples/sample.c`
+- 바이너리 직접 실행: `cargo run -- --tui ./path/to/binary`
+- CLI 모드(디버그 심볼만): `cargo run -- --symbol-index-mode debug-only --log-file perf.log examples/sample.c`
+- gdb 경로/추가 로그 예시: `cargo run -- --gdb /usr/bin/gdb --verbose --log-file perf.log --tui examples/sample.c`
 
 ## Requirements
 
@@ -54,9 +67,16 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 
 ```bash
 # 단일 소스 전달 시 자동 컴파일(.c/.cc/.cpp/.cxx → <name>-memviz.out)
-cargo run -- --tui --verbose --log-file perf.log examples/sample.c
+# 기본 심볼 모드: debug-only (glibc nondebug 제외, 빠름)
+cargo run -- --tui --log-file perf.log examples/sample.c
 
-# 또는 직접 빌드한 바이너리로 실행
+# 전체 심볼(디버그+nondebug) 포함: 느리지만 완전
+cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c
+
+# 심볼 인덱스 건너뛰기
+cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c
+
+# 직접 빌드한 바이너리로 실행
 gcc -g examples/sample.c -o examples/sample
 cargo run -- --tui ./examples/sample
 ```
@@ -71,11 +91,15 @@ gcc -g examples/sample.c -o examples/sample
 # Rust 바이너리 빌드
 cargo build
 
-# gdb-memviz 실행 (기본 gdb 사용, 로그는 파일로만 기록)
+# gdb-memviz 실행 (기본 gdb 사용, 로그는 파일로 기록)
 cargo run -- --log-file memviz.log ./examples/sample
 
-# 단일 소스 바로 실행 (내부에서 cc -g -O0로 빌드 후 실행)
+# 단일 소스 바로 실행 (내부에서 cc -g -O0로 빌드 후 실행, debug-only 심볼 인덱스)
 cargo run -- --tui examples/sample.c
+
+# 심볼 인덱스 모드 조정
+cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c
+cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c
 
 # gdb 경로 지정/verbose 로그 파일 예시
 cargo run -- --gdb /usr/bin/gdb --verbose --log-file perf.log ./examples/sample

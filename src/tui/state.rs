@@ -1,5 +1,6 @@
 use crate::interactive::printers::prettify_value;
 use crate::mi::{GlobalVar, LocalVar, MiSession, Result, StoppedLocation};
+use crate::symbols::{GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::tui::theme::Theme;
 use crate::types::{normalize_pointer_type, normalize_type_name};
 use std::path::PathBuf;
@@ -187,12 +188,20 @@ pub struct AppState {
     pub detail: DetailView,
     pub debugger: MiSession,
     pub binary_path: PathBuf,
+    pub symbol_index: Option<SymbolIndex>,
+    pub symbol_index_mode: SymbolIndexMode,
     warned_stale_binary: bool,
     pub verbose: bool,
 }
 
 impl AppState {
-    pub fn new(debugger: MiSession, binary_path: PathBuf, verbose: bool) -> Self {
+    pub fn new(
+        debugger: MiSession,
+        binary_path: PathBuf,
+        symbol_index: Option<SymbolIndex>,
+        symbol_index_mode: SymbolIndexMode,
+        verbose: bool,
+    ) -> Self {
         Self {
             theme: Theme::default(),
             focus: Focus::Source,
@@ -209,6 +218,8 @@ impl AppState {
             },
             debugger,
             binary_path,
+            symbol_index,
+            symbol_index_mode,
             warned_stale_binary: false,
             verbose,
         }
@@ -255,16 +266,43 @@ impl AppState {
         let locals = self.debugger.list_locals()?;
         self.symbols.locals = locals.into_iter().map(format_local_entry).collect();
 
-        // Read globals only once; cache for later steps.
-        if self.symbols.globals.is_empty() {
-            let filter_file = frame
-                .file
-                .as_deref()
-                .or(frame.fullname.as_deref())
-                .and_then(|p| std::path::Path::new(p).file_name())
-                .and_then(|os| os.to_str());
-            let globals = self.debugger.list_globals(filter_file)?;
-            self.symbols.globals = globals.into_iter().map(format_global_entry).collect();
+        // Globals via symbol index only.
+        let basename = frame
+            .file
+            .as_deref()
+            .or(frame.fullname.as_deref())
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|os| os.to_str())
+            .map(|s| s.to_owned());
+
+        if self.symbol_index.is_none() {
+            if let Ok(idx) = self
+                .debugger
+                .build_symbol_index(self.symbol_index_mode, basename.as_deref())
+            {
+                self.symbol_index = Some(idx);
+            } else {
+                crate::logger::log_debug("[tui] build_symbol_index failed; globals empty");
+            }
+        }
+
+        if let (Some(ref idx), Some(file)) = (&self.symbol_index, basename.as_deref()) {
+            let globals_with_vals: Vec<GlobalVarWithValue> =
+                self.debugger.list_globals_from_index(idx, Some(file))?;
+            crate::logger::log_debug(&format!(
+                "[tui] globals_for_basename {} -> {} entries",
+                file,
+                globals_with_vals.len()
+            ));
+            self.symbols.globals = globals_with_vals
+                .into_iter()
+                .map(format_global_from_value)
+                .collect();
+        } else {
+            crate::logger::log_debug(
+                "[tui] no symbol_index or no frame basename; clearing globals",
+            );
+            self.symbols.globals.clear();
         }
 
         // Ensure selected_index is within bounds
@@ -438,6 +476,25 @@ fn format_global_entry(var: GlobalVar) -> SymbolEntry {
         name: var.name.clone(),
         type_name: var.type_name.clone(),
         value_preview: format!("{} {} = {}", normalized_type, var.name, value),
+    }
+}
+
+fn format_global_from_value(g: GlobalVarWithValue) -> SymbolEntry {
+    let ty = g
+        .info
+        .type_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let normalized_type = normalize_display_type(&ty);
+    SymbolEntry {
+        name: g.info.name.clone(),
+        type_name: ty.clone(),
+        value_preview: format!(
+            "{} {} = {}",
+            normalized_type,
+            g.info.name,
+            prettify_value(&g.value)
+        ),
     }
 }
 

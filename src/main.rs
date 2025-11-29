@@ -9,6 +9,7 @@ mod vm;
 
 use logger::log_debug;
 use mi::{MiResponse, MiSession, Result};
+use symbols::SymbolIndexMode;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,11 +21,12 @@ enum TargetKind {
 fn main() -> Result<()> {
     // Parse CLI: allow --gdb override, verbose MI logging, log file, and forward the remaining args
     // to the target binary or single source. Exits with usage on missing target.
-    let usage = "usage: cargo run -- [--verbose|-v] [--log-file <path>] [--gdb <gdb-path>] [--tui|-t] <target> [args]";
+    let usage = "usage: cargo run -- [--verbose|-v] [--log-file <path>] [--gdb <gdb-path>] [--symbol-index-mode <mode>] [--tui|-t] <target> [args]";
     let mut gdb_bin = std::env::var("GDB").unwrap_or_else(|_| "gdb".to_string());
     let mut verbose = false;
     let mut tui_mode = false;
     let mut log_file: Option<PathBuf> = None;
+    let mut symbol_index_mode = SymbolIndexMode::DebugOnly;
     let mut target: Option<String> = None;
     let mut target_args: Vec<String> = Vec::new();
 
@@ -49,6 +51,25 @@ fn main() -> Result<()> {
             "--log-file" => {
                 if let Some(path) = iter.next() {
                     log_file = Some(PathBuf::from(path));
+                } else {
+                    eprintln!("{}", usage);
+                    std::process::exit(1);
+                }
+            }
+            "--symbol-index-mode" => {
+                if let Some(mode) = iter.next() {
+                    symbol_index_mode = match mode.as_str() {
+                        "none" => SymbolIndexMode::None,
+                        "debug-only" => SymbolIndexMode::DebugOnly,
+                        "debug-and-nondebug" => SymbolIndexMode::DebugAndNonDebug,
+                        _ => {
+                            eprintln!(
+                                "invalid --symbol-index-mode '{}', expected one of: none, debug-only, debug-and-nondebug",
+                                mode
+                            );
+                            std::process::exit(1);
+                        }
+                    };
                 } else {
                     eprintln!("{}", usage);
                     std::process::exit(1);
@@ -102,6 +123,14 @@ fn main() -> Result<()> {
         }
     };
 
+    let target_basename = match target_kind {
+        TargetKind::SingleSource { ref path, .. } => path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    };
+
     let (bin_path, prog_args) = match target_kind {
         TargetKind::Binary { path, args } => (path, args),
         TargetKind::SingleSource { path, args } => {
@@ -115,7 +144,14 @@ fn main() -> Result<()> {
         .ok_or_else(|| "binary path is not valid UTF-8".to_string())?;
 
     if tui_mode {
-        return tui::run_tui(&gdb_bin, bin_str, &prog_args, verbose);
+        return tui::run_tui(
+            &gdb_bin,
+            bin_str,
+            &prog_args,
+            verbose,
+            symbol_index_mode,
+            target_basename.clone(),
+        );
     }
 
     log_debug(&format!(
@@ -123,7 +159,14 @@ fn main() -> Result<()> {
         gdb_bin, bin_str, prog_args, verbose
     ));
     // Launch gdb/MI and do one-time probing before entering the REPL.
-    let mut session = MiSession::start(&gdb_bin, bin_str, &prog_args, verbose)?;
+    let mut session = MiSession::start(
+        &gdb_bin,
+        bin_str,
+        &prog_args,
+        verbose,
+        symbol_index_mode,
+        target_basename.clone(),
+    )?;
     session.drain_initial_output()?;
 
     log_debug("# probing gdb");
@@ -137,6 +180,10 @@ fn main() -> Result<()> {
     session.ensure_word_size();
     session.ensure_arch();
     session.ensure_endian();
+    // Build symbol index once (best effort)
+    if let Err(e) = session.build_symbol_index(symbol_index_mode, target_basename.as_deref()) {
+        log_debug(&format!("[sym] build_symbol_index (CLI) failed: {:?}", e));
+    }
     log_debug("Reached breakpoint at main. Type 'help' for commands.");
 
     interactive::repl(&mut session)?;

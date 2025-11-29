@@ -1,6 +1,6 @@
 use crate::mi::models::{
-    BreakpointInfo, Endian, LocalVar, MiStatus, MiSymbolInfoVariables, MiSymbolVariable,
-    StoppedLocation,
+    BreakpointInfo, Endian, LocalVar, MiStatus, MiSymbolFileGroup, MiSymbolInfoVariables,
+    MiSymbolVariable, StoppedLocation,
 };
 use regex::Regex;
 
@@ -305,6 +305,240 @@ pub(crate) fn parse_var_name(s: &str) -> Option<String> {
         .and_then(|re| re.captures(s).map(|c| c[1].to_string()))
 }
 
+/// Parse a simple `key="value"` field from MI text.
+fn parse_field(s: &str, key: &str) -> Option<String> {
+    let pattern = format!(r#"{key}="((?:\\.|[^"])*)""#);
+    Regex::new(&pattern)
+        .ok()
+        .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
+}
+
+/// Extract the block following `key=`, returning the substring from the first `open_char`
+/// through its matching `close_char`. String literals are skipped while tracking depth.
+fn extract_block_after_key<'a>(
+    src: &'a str,
+    key: &str,
+    open_char: char,
+    close_char: char,
+) -> Option<&'a str> {
+    let key_pos = src.find(key)?;
+    let after_key = &src[key_pos + key.len()..];
+    let chars: Vec<(usize, char)> = after_key.char_indices().collect();
+
+    let mut i = 0usize;
+    // Skip separators immediately after the key.
+    while i < chars.len() {
+        let (_, ch) = chars[i];
+        if ch == '=' || ch.is_whitespace() || ch == ',' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut start_byte = None;
+    let mut depth = 0usize;
+
+    while i < chars.len() {
+        let (idx, ch) = chars[i];
+        if ch == '"' {
+            // Skip over string literals so braces/brackets inside them are ignored.
+            i += 1;
+            while i < chars.len() {
+                let (_, inner) = chars[i];
+                if inner == '\\' {
+                    i = (i + 2).min(chars.len());
+                    continue;
+                }
+                if inner == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if start_byte.is_none() {
+            if ch == open_char {
+                start_byte = Some(idx);
+                depth = 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            c if c == open_char => depth += 1,
+            c if c == close_char => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let start = start_byte?;
+                    return after_key.get(start..=idx);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+/// Split a list containing brace-delimited objects into individual `{...}` slices,
+/// skipping over string literals while tracking brace depth.
+fn split_braced_objects(list_src: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut start_byte: Option<usize> = None;
+
+    let chars: Vec<(usize, char)> = list_src.char_indices().collect();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let (idx, ch) = chars[i];
+        match ch {
+            '"' => {
+                i += 1;
+                while i < chars.len() {
+                    let (_, inner) = chars[i];
+                    if inner == '\\' {
+                        i = (i + 2).min(chars.len());
+                        continue;
+                    }
+                    if inner == '"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            '{' => {
+                if depth == 0 {
+                    start_byte = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(start) = start_byte {
+                            if let Some(slice) = list_src.get(start..=idx) {
+                                result.push(slice);
+                            }
+                        }
+                        start_byte = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    result
+}
+
+fn parse_symbol_from_value(s: &str) -> Option<MiSymbolVariable> {
+    let name = parse_field(s, "name")?;
+    let type_name = parse_field(s, "type");
+    let line = parse_field(s, "line").and_then(|l| l.parse::<u32>().ok());
+    let description = parse_field(s, "description");
+    Some(MiSymbolVariable {
+        name,
+        type_name,
+        line,
+        description,
+    })
+}
+
+fn parse_group_list(raw: &str, target_basename: Option<&str>) -> Vec<MiSymbolFileGroup> {
+    let mut groups = Vec::new();
+    for block in split_braced_objects(raw) {
+        if let Some(tb) = target_basename {
+            if !block.contains(tb) {
+                continue;
+            }
+        }
+        let filename = parse_field(block, "filename");
+        let fullname = parse_field(block, "fullname");
+
+        // symbols=[{...}] or variables=[{...}]
+        let symbols_text = extract_block_after_key(block, "symbols", '[', ']')
+            .or_else(|| extract_block_after_key(block, "variables", '[', ']'));
+        let mut symbols = Vec::new();
+        if let Some(list) = symbols_text {
+            for sym in split_braced_objects(list) {
+                if let Some(parsed) = parse_symbol_from_value(sym) {
+                    symbols.push(parsed);
+                }
+            }
+        } else if let Some(sym) = parse_symbol_from_value(block) {
+            // Fallback: current tuple itself is a symbol
+            symbols.push(sym);
+        }
+
+        groups.push(MiSymbolFileGroup {
+            filename,
+            fullname,
+            symbols,
+        });
+
+        if target_basename.is_some() {
+            break;
+        }
+    }
+    groups
+}
+
+pub(crate) fn parse_symbol_info_variables(
+    raw: &str,
+    target_basename: Option<&str>,
+) -> MiSymbolInfoVariables {
+    // Try symbols={...} first (common with --include-nondebug).
+    if let Some(symbols_block) = extract_block_after_key(raw, "symbols", '{', '}') {
+        let mut info = MiSymbolInfoVariables::default();
+        if let Some(debug_block) = extract_block_after_key(symbols_block, "debug", '[', ']') {
+            info.debug = parse_group_list(&debug_block, target_basename);
+        }
+        if let Some(nondebug_block) = extract_block_after_key(symbols_block, "nondebug", '[', ']')
+        {
+            info.nondebug = parse_group_list(&nondebug_block, target_basename);
+        }
+
+        if !info.debug.is_empty() || !info.nondebug.is_empty() {
+            return info;
+        }
+    }
+
+    // Fallback: top-level symbols=[{...}] without debug/nondebug buckets.
+    if let Some(vars_block) = extract_block_after_key(raw, "symbols", '[', ']') {
+        let symbols = parse_group_list(&vars_block, target_basename);
+        if !symbols.is_empty() {
+            return MiSymbolInfoVariables {
+                debug: symbols,
+                nondebug: Vec::new(),
+            };
+        }
+    }
+
+    // Fallback: top-level variables=[{...}]
+    if let Some(vars_block) = extract_block_after_key(raw, "variables", '[', ']') {
+        let symbols = parse_group_list(&vars_block, target_basename);
+        if !symbols.is_empty() {
+            return MiSymbolInfoVariables {
+                debug: symbols,
+                nondebug: Vec::new(),
+            };
+        }
+    }
+
+    MiSymbolInfoVariables::default()
+}
+
 pub(crate) fn parse_endian(val: &str) -> Endian {
     let lower = val.to_ascii_lowercase();
     if lower.contains("little") {
@@ -376,51 +610,55 @@ mod tests {
         assert_eq!(locals[0].ty.as_deref(), Some("int"));
         assert_eq!(locals[1].value.as_deref(), Some("foo"));
     }
-}
 
-/// Parse a simple `key="value"` field from MI text.
-pub(crate) fn parse_field(s: &str, key: &str) -> Option<String> {
-    let pattern = format!(r#"{key}="((?:\\.|[^"])*)""#);
-    Regex::new(&pattern)
-        .ok()
-        .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
-}
-
-pub(crate) fn parse_symbol_info_variables(s: &str) -> MiSymbolInfoVariables {
-    let mut vars = Vec::new();
-    let block_re = Regex::new(r"\{[^}]*\}").ok();
-    if let Some(block_re) = block_re {
-        for block in block_re.find_iter(s) {
-            let text = block.as_str();
-            let name = parse_field(text, "name").unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let kind = parse_field(text, "kind");
-            let type_name = parse_field(text, "type");
-            let file = parse_field(text, "file");
-            let line = parse_field(text, "line").and_then(|l| l.parse::<u32>().ok());
-            let is_local = parse_field(text, "is_local")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            let is_argument = parse_field(text, "is_argument")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            let is_static = parse_field(text, "is_static")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-
-            vars.push(MiSymbolVariable {
-                name,
-                kind,
-                type_name,
-                file,
-                line,
-                is_local,
-                is_argument,
-                is_static,
-            });
-        }
+    #[test]
+    fn test_extract_block_after_key_handles_nested_lists() {
+        let raw = r#"^done,symbols={debug=[{name="a"},{name="b"}],nondebug=[{name="c"}]}"#;
+        let symbols_block = extract_block_after_key(raw, "symbols", '{', '}').unwrap();
+        let debug_block = extract_block_after_key(symbols_block, "debug", '[', ']').unwrap();
+        let objects = split_braced_objects(debug_block);
+        assert_eq!(objects.len(), 2);
+        assert!(objects[0].contains(r#"name="a""#));
+        let nondebug_block = extract_block_after_key(symbols_block, "nondebug", '[', ']').unwrap();
+        let nondebug_objects = split_braced_objects(nondebug_block);
+        assert_eq!(nondebug_objects.len(), 1);
     }
-    MiSymbolInfoVariables { variables: vars }
+
+    #[test]
+    fn test_parse_symbol_info_variables_parses_nested_groups() {
+        let raw = r#"^done,symbols={
+    debug=[
+      {filename="../dlfcn/dlerror.h",
+       fullname="/usr/src/glibc/dlfcn/dlerror.h",
+       symbols=[{name="__libc_dlerror_result",type="struct dl_action_result",line="83",description="{in braces}"}]},
+      {filename="sample.c",
+       fullname="/home/user/sample.c",
+       symbols=[{name="g_counter",type="int",line="12"},{name="flag",description="flag value"}]}
+    ],
+    nondebug=[
+      {filename="../stdlib/strtol_l.c",
+       symbols=[{name="strtol_l_internal",type="int"}]}
+    ]
+}"#;
+
+        let parsed = parse_symbol_info_variables(raw, None);
+        assert_eq!(parsed.debug.len(), 2);
+        assert_eq!(parsed.nondebug.len(), 1);
+        assert_eq!(parsed.debug[0].filename.as_deref(), Some("../dlfcn/dlerror.h"));
+        assert_eq!(
+            parsed.debug[0].symbols[0].description.as_deref(),
+            Some("{in braces}")
+        );
+        assert_eq!(parsed.debug[1].symbols.len(), 2);
+        assert_eq!(parsed.debug[1].symbols[0].line, Some(12));
+        assert_eq!(parsed.nondebug[0].symbols[0].name, "strtol_l_internal");
+
+        let total: usize = parsed
+            .debug
+            .iter()
+            .chain(parsed.nondebug.iter())
+            .map(|g| g.symbols.len())
+            .sum();
+        assert_eq!(total, 4);
+    }
 }

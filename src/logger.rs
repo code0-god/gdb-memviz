@@ -31,10 +31,6 @@ impl Logger {
     }
 
     pub fn log(&self, msg: &str) {
-        let verbose = self.verbose.lock().map(|v| *v).unwrap_or(false);
-        if !verbose {
-            return;
-        }
         if let Ok(mut guard) = self.file.lock() {
             if let Some(f) = guard.as_mut() {
                 let _ = writeln!(f, "{msg}");
