@@ -4,6 +4,13 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 - `--symbol-index-mode` 추가: `debug-only`(기본) / `debug-and-nondebug` / `none`
 - 단일 소스(.c/.cc/.cpp/.cxx) 모드에서는 심볼 인덱스 파싱 시 대상 basename만 파싱하도록 최적화 (glibc 디버그 심볼 대량 파싱을 회피)
 - `--log-file`만 지정해도 로그가 항상 기록됨 (`--verbose`는 stdout 미러용)
+- TUI 소스 패널 전면 정리:
+  - statusline 색상 독립 설정(`file_status_bg`/`file_status_fg`)
+  - PC 마커·스페이서 분리 후 가터부터 하이라이트(배경만 덮어 전경 유지)
+  - 패널 배경을 전체 영역에 채워 누락된 여백 제거
+  - cmdline과 패널 사이 구분선 제거
+  - 테마 파일(`src/tui/theme.rs`)로 syntax/마커/패널/상태라인 색상을 일원화 관리
+- TUI 소스 코드 하이라이트 추가: 간단한 C/C++ 토큰(키워드/타입/문자열/숫자/주석) 컬러링을 `src/tui/highlight.rs`로 적용, 색상 팔레트는 `src/tui/theme.rs`의 `syntax_*` 값으로 조정 가능
 
 ## 실행 옵션 요약
 - TUI + 디버그 심볼만(기본, 빠름): `cargo run -- --tui --symbol-index-mode debug-only --log-file perf.log examples/sample.c`
@@ -52,7 +59,7 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 ### 레이아웃 구조
 - **헤더**: 상태 정보 한 줄 (모드, 포커스, 파일명:라인, 아키텍처, 심볼 모드)
 - **본문**:
-  - 좌측 (기본 60%, 조정 가능): `Source` 패널 - 소스 코드 뷰 (실제 파일 표시, PC 위치 표시)
+  - 좌측 (기본 60%, 조정 가능): `Source` 패널 - 소스 코드 뷰 (실제 파일 표시, PC 위치 표시, 간단한 C/C++ 하이라이트, statusline 색상 독립 설정)
   - 우측 (기본 40%, 조정 가능): `VM Layout` 패널 - 가상 메모리 레이아웃 (placeholder)
   - `Ctrl+←/→`로 좌우 비율 조정 가능 (30%~80% 범위)
 - **커맨드라인**: 하단에 `:` 프롬프트 (향후 명령 입력용, 현재는 표시만)

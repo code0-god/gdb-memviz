@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+pub mod highlight;
 pub mod state;
 pub mod theme;
 pub mod ui;
