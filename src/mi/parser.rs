@@ -1,6 +1,4 @@
-use crate::mi::models::{
-    BreakpointInfo, Endian, LocalVar, MiStatus, StoppedLocation,
-};
+use crate::mi::models::{BreakpointInfo, Endian, LocalVar, MiStatus, StoppedLocation};
 use regex::Regex;
 
 pub(crate) fn parse_status(line: &str) -> MiStatus {
@@ -41,7 +39,9 @@ pub(crate) fn parse_addr_field(s: &str) -> Option<String> {
         .and_then(|re| re.captures(s).map(|c| c[1].to_string()))
 }
 
-pub(crate) fn parse_memory_contents(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn parse_memory_contents(
+    s: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     // Preferred MI form: memory=[{...,bytes="aabbcc"}]
     if let Some(caps) = Regex::new(r#"bytes="([0-9a-fA-F]+)""#)?.captures(s) {
         return hex_str_to_bytes(&caps[1]);
@@ -163,7 +163,9 @@ pub(crate) fn parse_hex_byte(raw: &str) -> Option<u8> {
     u8::from_str_radix(num, 16).ok()
 }
 
-pub(crate) fn hex_str_to_bytes(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn hex_str_to_bytes(
+    s: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     if s.len() % 2 != 0 {
         return Err("odd-length hex string in memory contents".into());
     }

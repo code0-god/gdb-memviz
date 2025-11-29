@@ -1,6 +1,7 @@
 // Entry point wires CLI parsing to the MI session and REPL.
 mod interactive;
 mod mi;
+mod tui;
 mod types;
 mod vm;
 
@@ -9,8 +10,10 @@ use mi::{MiResponse, MiSession, Result};
 fn main() -> Result<()> {
     // Parse CLI: allow --gdb override, verbose MI logging, and forward the remaining args
     // to the target binary. Exits with usage on missing target.
+    let usage = "usage: cargo run -- [--verbose|-v] [--gdb <gdb-path>] [--tui|-t] <target> [args]";
     let mut gdb_bin = std::env::var("GDB").unwrap_or_else(|_| "gdb".to_string());
     let mut verbose = false;
+    let mut tui_mode = false;
     let mut target: Option<String> = None;
     let mut target_args: Vec<String> = Vec::new();
 
@@ -22,14 +25,15 @@ fn main() -> Result<()> {
                 if let Some(bin) = iter.next() {
                     gdb_bin = bin;
                 } else {
-                    eprintln!(
-                        "usage: cargo run -- [--verbose|-v] [--gdb <gdb-path>] <target> [args]"
-                    );
+                    eprintln!("{}", usage);
                     std::process::exit(1);
                 }
             }
             "--verbose" | "-v" => {
                 verbose = true;
+            }
+            "--tui" | "-t" => {
+                tui_mode = true;
             }
             _ => {
                 target = Some(arg);
@@ -40,13 +44,17 @@ fn main() -> Result<()> {
     }
 
     if target.is_none() {
-        eprintln!("usage: cargo run -- [--verbose|-v] [--gdb <gdb-path>] <target> [args]");
+        eprintln!("{}", usage);
         std::process::exit(1);
     }
     let target = target.unwrap();
     if !std::path::Path::new(&target).exists() {
         eprintln!("target not found: {}", target);
         std::process::exit(1);
+    }
+
+    if tui_mode {
+        return tui::run_tui().map_err(|e| e.into());
     }
 
     println!(

@@ -31,6 +31,36 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 - `view`의 struct/array 파서는 단순한 케이스를 대상으로 한 최소 구현입니다. 복잡한 중첩 타입/패딩/얼라인 처리는 향후 확장 예정입니다.
 - 일부 환경에서 gdb의 엔디안 정보를 가져오지 못하면 `layout: unknown-endian`으로 표시될 수 있습니다(동작에는 영향 없음).
 
+## TUI (Experimental)
+
+`gdb-memviz`는 gdb/MI 기반 CLI 도구를 기본으로 하지만, 터미널 기반 TUI도 실험적으로 개발 중입니다. 현재 상태는 **TUI T0.1** 수준으로, 다음과 같은 골격을 제공합니다.
+
+- 상단 status bar
+- 좌측 상단: `Source` 패널 (예제 소스 placeholder)
+- 좌측 하단: `Symbols` 패널 (locals/globals placeholder)
+- 우측 상단: `VM Layout` 캔버스 (가상 메모리 레이아웃 placeholder)
+- 우측 하단: `Detail` 패널 (struct/메모리 뷰 placeholder)
+- 패널 포커스/스크롤/리사이즈:
+  - `Ctrl+h/j/k/l`: 포커스 이동 (vim 스타일)
+  - `Ctrl+←/→`: 좌/우 컬럼 비율 조정
+  - `Ctrl+↑/↓`: 상/하 패널 비율 조정(해당 컬럼 내)
+  - `=`: 레이아웃 리셋
+  - `Up/Down/PageUp/PageDown`: 포커스된 패널 스크롤/선택 이동
+  - `q`: 종료
+  - VS Code 통합 터미널에서 `Ctrl+화살표`가 가로채지면 키바인딩을 해제/변경하거나 외부 터미널을 사용하세요.
+
+### Run TUI (experimental)
+
+```bash
+# 예제 프로그램 빌드
+gcc -g examples/sample.c -o examples/sample
+
+# TUI 모드 실행 (--tui 플래그)
+cargo run -- --tui ./examples/sample
+```
+
+> TUI 모드는 아직 **디버깅 데이터가 완전히 연결되기 전 단계**이며, placeholder 레이아웃과 패널 구조, 포커스/스크롤/리사이즈 등 UI 골격만 제공합니다. 이후 단계에서 CLI의 `locals`, `globals`, `vm`, `view`, `mem` 정보를 TUI 패널에 바인딩할 예정입니다.
+
 ## Build & Run
 ```bash
 # 예제 C 프로그램 빌드
@@ -68,3 +98,6 @@ memviz> quit
 - 포인터 체인/링크드 구조 탐색을 통한 재귀적 메모리 뷰
 - VM 전체 레이아웃(text/data/heap/stack) 시각화
 - TUI 또는 Web UI 확장, 명령어 자동완성/히스토리, 스크립트 지원
+- TUI Phase T1: `locals`/`globals`/`vm` 데이터를 패널에 연결
+- TUI Phase T2: VM 캔버스에서 symbol 위치 하이라이트, 포인터 체인 시각화
+- TUI Phase T3: 소스 라인/PC 연동, breakpoint 표시, step/continue 통합

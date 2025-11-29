@@ -749,10 +749,7 @@ fn parse_address_str(s: &str) -> Option<u64> {
     }
     if let Some(idx) = trimmed.find("0x") {
         let rest = &trimmed[idx + 2..];
-        let hex_part: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_hexdigit())
-            .collect();
+        let hex_part: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
         if !hex_part.is_empty() {
             return u64::from_str_radix(&hex_part, 16).ok();
         }
