@@ -6,8 +6,9 @@ use crate::mi::models::{
 use crate::mi::parser::{
     bytes_to_u64, guess_endian_from_arch, mi_escape, parse_addr_field, parse_breakpoint,
     parse_endian, parse_locals, parse_memory_contents, parse_status, parse_stopped,
-    parse_type_field, parse_usize, parse_value_field, parse_var_name,
+    parse_symbol_info_variables, parse_type_field, parse_usize, parse_value_field, parse_var_name,
 };
+use crate::symbols::{GlobalVarInfo, GlobalVarWithValue, SymbolIndex};
 use crate::types::{parse_ptype_output, TypeLayout};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -26,6 +27,7 @@ pub struct MiSession {
     pub endian: Endian,
     pub arch: Option<String>,
     target_hint: String,
+    pub symbol_index: Option<SymbolIndex>,
 }
 
 impl MiSession {
@@ -73,6 +75,7 @@ impl MiSession {
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            symbol_index: None,
         })
     }
 
@@ -324,24 +327,82 @@ impl MiSession {
         parse_field(&resp.result, "fullname").or_else(|| parse_field(&resp.result, "file"))
     }
 
-    /// List global variables visible to gdb (console-based parsing).
-    /// When `filter_file` is Some("foo.c"), only variables under that File block are returned.
-    pub fn list_globals(&mut self, filter_file: Option<&str>) -> Result<Vec<GlobalVar>> {
-        let resp = self.exec_command("-interpreter-exec console \"info variables\"")?;
-        let mut text = String::new();
-        text.push_str(&resp.result.replace("\\n", "\n").replace("\\t", "\t"));
-        text.push('\n');
-        for line in &resp.oob {
-            let cleaned = line
-                .trim_start_matches("~\"")
-                .trim_end_matches('"')
-                .replace("\\n", "\n")
-                .replace("\\t", "\t");
-            text.push_str(&cleaned);
-            text.push('\n');
+    /// Build and cache symbol index from gdb.
+    pub fn build_symbol_index(&mut self) -> Result<SymbolIndex> {
+        let resp = self.exec_command("-symbol-info-variables")?;
+        log_debug(&format!("[mi<-sym] {}", resp.result));
+        let parsed = parse_symbol_info_variables(&resp.result);
+        let mut index = SymbolIndex::default();
+        for v in parsed.variables {
+            if v.is_local || v.is_argument {
+                continue;
+            }
+            let basename = v
+                .file
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|os| os.to_str())
+                .map(|s| s.to_owned());
+            let info = GlobalVarInfo {
+                name: v.name,
+                type_name: v.type_name,
+                file: v.file,
+                line: v.line,
+                is_static: v.is_static,
+                is_function_scope: false,
+            };
+            if let Some(b) = basename {
+                index.globals_by_file.entry(b).or_default().push(info);
+            }
         }
+        self.symbol_index = Some(index.clone());
+        Ok(index)
+    }
 
-        Ok(parse_info_variables_output(&text, filter_file, self))
+    /// List globals using the cached symbol index (building it if needed).
+    pub fn list_globals(&mut self, filter_file: Option<&str>) -> Result<Vec<GlobalVar>> {
+        let index = match self.symbol_index.clone() {
+            Some(idx) => idx,
+            None => self.build_symbol_index()?,
+        };
+        let vals = self.list_globals_from_index(&index, filter_file)?;
+        let globals = vals
+            .into_iter()
+            .map(|gv| GlobalVar {
+                name: gv.info.name,
+                type_name: gv.info.type_name.unwrap_or_else(|| "unknown".to_string()),
+                value: gv.value,
+                address: gv.address,
+            })
+            .collect();
+        Ok(globals)
+    }
+
+    pub fn list_globals_from_index(
+        &mut self,
+        index: &SymbolIndex,
+        filter_file: Option<&str>,
+    ) -> Result<Vec<GlobalVarWithValue>> {
+        let file = match filter_file {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        };
+        let Some(entries) = index.globals_by_file.get(file) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for info in entries {
+            let val = self
+                .evaluate_expression(&info.name)
+                .unwrap_or_else(|_| "<unavailable>".to_string());
+            let addr = self.eval_address_of_expr(&info.name).unwrap_or(0);
+            out.push(GlobalVarWithValue {
+                info: info.clone(),
+                value: val,
+                address: addr,
+            });
+        }
+        Ok(out)
     }
 
     /// Evaluate expression and return (type, value) strings.

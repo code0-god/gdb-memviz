@@ -2,6 +2,7 @@
 mod interactive;
 mod logger;
 mod mi;
+mod symbols;
 mod tui;
 mod types;
 mod vm;

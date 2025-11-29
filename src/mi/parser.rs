@@ -1,4 +1,7 @@
-use crate::mi::models::{BreakpointInfo, Endian, LocalVar, MiStatus, StoppedLocation};
+use crate::mi::models::{
+    BreakpointInfo, Endian, LocalVar, MiStatus, MiSymbolInfoVariables, MiSymbolVariable,
+    StoppedLocation,
+};
 use regex::Regex;
 
 pub(crate) fn parse_status(line: &str) -> MiStatus {
@@ -373,4 +376,51 @@ mod tests {
         assert_eq!(locals[0].ty.as_deref(), Some("int"));
         assert_eq!(locals[1].value.as_deref(), Some("foo"));
     }
+}
+
+/// Parse a simple `key="value"` field from MI text.
+pub(crate) fn parse_field(s: &str, key: &str) -> Option<String> {
+    let pattern = format!(r#"{key}="((?:\\.|[^"])*)""#);
+    Regex::new(&pattern)
+        .ok()
+        .and_then(|re| re.captures(s).map(|c| unescape_value(&c[1])))
+}
+
+pub(crate) fn parse_symbol_info_variables(s: &str) -> MiSymbolInfoVariables {
+    let mut vars = Vec::new();
+    let block_re = Regex::new(r"\{[^}]*\}").ok();
+    if let Some(block_re) = block_re {
+        for block in block_re.find_iter(s) {
+            let text = block.as_str();
+            let name = parse_field(text, "name").unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let kind = parse_field(text, "kind");
+            let type_name = parse_field(text, "type");
+            let file = parse_field(text, "file");
+            let line = parse_field(text, "line").and_then(|l| l.parse::<u32>().ok());
+            let is_local = parse_field(text, "is_local")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            let is_argument = parse_field(text, "is_argument")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            let is_static = parse_field(text, "is_static")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+
+            vars.push(MiSymbolVariable {
+                name,
+                kind,
+                type_name,
+                file,
+                line,
+                is_local,
+                is_argument,
+                is_static,
+            });
+        }
+    }
+    MiSymbolInfoVariables { variables: vars }
 }

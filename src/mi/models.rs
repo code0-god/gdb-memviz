@@ -68,3 +68,20 @@ pub struct GlobalVar {
     pub value: String,
     pub address: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct MiSymbolVariable {
+    pub name: String,
+    pub kind: Option<String>,
+    pub type_name: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub is_local: bool,
+    pub is_argument: bool,
+    pub is_static: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MiSymbolInfoVariables {
+    pub variables: Vec<MiSymbolVariable>,
+}
