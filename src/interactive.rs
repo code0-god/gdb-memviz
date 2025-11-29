@@ -1,6 +1,6 @@
 mod commands;
 mod follow;
-mod printers;
+pub mod printers;
 
 use crate::mi::{MiSession, Result};
 use commands::{execute_command, CommandOutcome};

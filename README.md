@@ -20,7 +20,8 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
   - `vm locate <expr>`: 표현식 주소가 어떤 VM region에 속하는지 표시
   - `vm vars`: locals/globals/포인터 대상 객체를 VM region 별로 묶어 보여줌
 - `help`, `quit`
-- `--gdb <path>` 또는 `GDB=<path>`로 gdb 바이너리 지정, `--verbose`로 MI 송수신 로그를 `stderr`에 출력 (기본 모드는 gdb/MI 잡음 숨김)
+- `--gdb <path>` 또는 `GDB=<path>`로 gdb 바이너리 지정
+- `--verbose` + `--log-file <path>`로 MI/TUI 디버그 로그를 파일에 기록 (TUI 화면은 깔끔하게 유지)
 
 ## Limitations (Phase 2 entry)
 - `mem`은 단순 심볼/간단 표현식을 권장합니다. `mem arr[2]`, `mem node.count` 정도는 동작하지만 복잡한 표현식은 보장하지 않습니다.
@@ -52,10 +53,11 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 ### Run TUI (experimental)
 
 ```bash
-# 예제 프로그램 빌드
-gcc -g examples/sample.c -o examples/sample
+# 단일 소스 전달 시 자동 컴파일(.c/.cc/.cpp/.cxx → <name>-memviz.out)
+cargo run -- --tui --verbose --log-file perf.log examples/sample.c
 
-# TUI 모드 실행 (--tui 플래그)
+# 또는 직접 빌드한 바이너리로 실행
+gcc -g examples/sample.c -o examples/sample
 cargo run -- --tui ./examples/sample
 ```
 
@@ -69,11 +71,14 @@ gcc -g examples/sample.c -o examples/sample
 # Rust 바이너리 빌드
 cargo build
 
-# gdb-memviz 실행 (기본 gdb 사용, 로그 최소화)
-cargo run -- ./examples/sample
+# gdb-memviz 실행 (기본 gdb 사용, 로그는 파일로만 기록)
+cargo run -- --log-file memviz.log ./examples/sample
 
-# gdb 경로 지정/로그 확인 예시
-cargo run -- --gdb /usr/bin/gdb --verbose ./examples/sample
+# 단일 소스 바로 실행 (내부에서 cc -g -O0로 빌드 후 실행)
+cargo run -- --tui examples/sample.c
+
+# gdb 경로 지정/verbose 로그 파일 예시
+cargo run -- --gdb /usr/bin/gdb --verbose --log-file perf.log ./examples/sample
 ```
 
 REPL에서 사용할 수 있는 명령:

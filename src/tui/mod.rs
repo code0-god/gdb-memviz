@@ -21,7 +21,7 @@ pub mod theme;
 pub mod ui;
 
 use crate::mi::MiSession;
-use state::{AppState, Focus, PaneNode, SplitDir};
+use state::{AppState, Focus, PaneNode, SplitDir, SymbolSection};
 use std::path::PathBuf;
 
 pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<()> {
@@ -30,7 +30,7 @@ pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> R
     session.drain_initial_output()?;
 
     // Run to main and initialize session state
-    session.run_to_main()?;
+    let initial_stop = session.run_to_main()?;
     session.ensure_word_size();
     session.ensure_arch();
     session.ensure_endian();
@@ -46,10 +46,10 @@ pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> R
     let keyboard_enhanced = enable_keyboard_enhancement(terminal.backend_mut());
 
     // Create app state with session
-    let mut app = AppState::new(session, PathBuf::from(target));
+    let mut app = AppState::new(session, PathBuf::from(target), verbose);
 
     // Refresh after initial stop at main
-    if let Err(e) = app.refresh_after_stop() {
+    if let Err(e) = app.refresh_after_stop(Some(&initial_stop)) {
         eprintln!("[tui] refresh_after_stop error: {:?}", e);
     }
 
@@ -135,7 +135,26 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         return true;
     }
 
-    // 2) Ctrl + h/j/k/l for focus movement
+    // 2) Symbols panel: quick switch between locals/globals with 'l' / 'g'
+    if press_or_repeat && key.modifiers.is_empty() && matches!(app.focus, state::PaneId::Symbols) {
+        match key.code {
+            KeyCode::Char('l') => {
+                app.symbols.selected_section = SymbolSection::Locals;
+                app.symbols.selected_index = 0;
+                clamp_symbol_selection(app);
+                return false;
+            }
+            KeyCode::Char('g') => {
+                app.symbols.selected_section = SymbolSection::Globals;
+                app.symbols.selected_index = 0;
+                clamp_symbol_selection(app);
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    // 3) Ctrl + h/j/k/l for focus movement
     if press_or_repeat && key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('h') => move_focus_dir(app, Direction::Left),
@@ -153,17 +172,17 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         return false;
     }
 
-    // 3) Reset layout (no modifier): =
+    // 4) Reset layout (no modifier): =
     if press_or_repeat && key.code == KeyCode::Char('=') {
         app.layout = state::LayoutState::default();
         return false;
     }
 
-    // 4) F5: Step over (next) -- ignore key repeats to avoid skipping lines.
+    // 5) F5: Step over (next) -- ignore key repeats to avoid skipping lines.
     if matches!(key.kind, KeyEventKind::Press) && key.code == KeyCode::F(5) {
         match app.debugger.exec_next() {
-            Ok(_loc) => {
-                if let Err(e) = app.refresh_after_stop() {
+            Ok(loc) => {
+                if let Err(e) = app.refresh_after_stop(Some(&loc)) {
                     eprintln!("[tui] refresh_after_stop error: {:?}", e);
                 }
             }
@@ -179,7 +198,7 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         return false;
     }
 
-    // 5) Scrolling (arrows and PageUp/Down)
+    // 6) Scrolling (arrows and PageUp/Down)
     if !press_or_repeat {
         return false;
     }
@@ -226,6 +245,18 @@ fn resize_current(app: &mut AppState, dir: SplitDir, delta: i8) {
     adjust_ratio_recursive(&mut app.layout.root, app.focus, dir, delta);
 }
 
+fn clamp_symbol_selection(app: &mut AppState) {
+    let len = match app.symbols.selected_section {
+        SymbolSection::Locals => app.symbols.locals.len(),
+        SymbolSection::Globals => app.symbols.globals.len(),
+    };
+    if len == 0 {
+        app.symbols.selected_index = 0;
+    } else if app.symbols.selected_index >= len {
+        app.symbols.selected_index = len - 1;
+    }
+}
+
 fn adjust_ratio_recursive(node: &mut PaneNode, target: Focus, dir: SplitDir, delta: i8) -> bool {
     match node {
         PaneNode::Leaf(id) => *id == target,
@@ -259,14 +290,17 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
             app.source.scroll_top = apply_scroll_u32(app.source.scroll_top, delta, max);
         }
         PaneId::Symbols => {
-            if app.symbols.lines.is_empty() {
+            let current_len = match app.symbols.selected_section {
+                SymbolSection::Locals => app.symbols.locals.len(),
+                SymbolSection::Globals => app.symbols.globals.len(),
+            };
+            if current_len == 0 {
                 return;
             }
-            let len = app.symbols.lines.len() as i32;
-            let new_sel = (app.symbols.selected as i32 + delta as i32).clamp(0, len - 1);
-            app.symbols.selected = new_sel as usize;
-            let max = max_scroll(&app.symbols.lines);
-            app.symbols.scroll_y = apply_scroll(app.symbols.scroll_y, delta, max);
+            let max_index = current_len.saturating_sub(1);
+            let new_index = (app.symbols.selected_index as i32 + delta as i32)
+                .clamp(0, max_index as i32) as usize;
+            app.symbols.selected_index = new_index;
         }
         PaneId::VmCanvas => {
             let max = max_scroll(&app.vm.lines);

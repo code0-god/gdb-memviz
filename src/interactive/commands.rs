@@ -8,6 +8,7 @@ use crate::mi::{MiSession, Result};
 use crate::types::{is_pointer_type, normalize_type_name, strip_pointer_suffix, TypeLayout};
 use crate::vm::{self, VmLabel};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub enum CommandOutcome {
     Continue,
@@ -148,7 +149,10 @@ fn handle_vm_vars(session: &mut MiSession) {
             return;
         }
     };
-    let globals = match session.list_globals() {
+    let globals_filter = session
+        .current_frame_file()
+        .and_then(|p| Path::new(&p).file_name()?.to_str().map(|s| s.to_string()));
+    let globals = match session.list_globals(globals_filter.as_deref()) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("vm vars: failed to list globals: {}", e);
@@ -236,7 +240,10 @@ fn handle_vm_vars(session: &mut MiSession) {
 }
 
 fn handle_globals(session: &mut MiSession) {
-    let globals = match session.list_globals() {
+    let globals_filter = session
+        .current_frame_file()
+        .and_then(|p| Path::new(&p).file_name()?.to_str().map(|s| s.to_string()));
+    let globals = match session.list_globals(globals_filter.as_deref()) {
         Ok(gs) => gs,
         Err(e) => {
             eprintln!("globals: failed to list globals: {}", e);

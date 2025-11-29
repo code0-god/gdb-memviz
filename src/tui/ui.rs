@@ -1,5 +1,8 @@
 use crate::tui::{
-    state::{AppState, Focus, PaneId, PaneNode, SourceViewState, SplitDir},
+    state::{
+        AppState, Focus, PaneId, PaneNode, SourceViewState, SplitDir, SymbolSection,
+        SymbolsViewState,
+    },
     theme::Theme,
 };
 use ratatui::{
@@ -110,15 +113,13 @@ pub fn draw(f: &mut Frame, app: &AppState) {
         app.vm.scroll_y,
     );
 
-    render_panel(
+    render_symbols_panel(
         f,
         theme,
         symbols_area,
-        " Symbols (placeholder) ",
         PaneId::Symbols,
         app.focus,
-        &app.symbols.lines,
-        app.symbols.scroll_y,
+        &app.symbols,
     );
 
     render_panel(
@@ -195,6 +196,71 @@ fn render_source_panel(
     };
 
     let block = theme.panel_block_focus(&title, panel == focus);
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.panel_text).bg(theme.bg))
+        .block(block);
+
+    f.render_widget(paragraph, area);
+}
+
+fn render_symbols_panel(
+    f: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    panel: Focus,
+    focus: Focus,
+    symbols: &SymbolsViewState,
+) {
+    // Clear the panel area first
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Locals section
+    lines.push(Line::from("locals:"));
+
+    if symbols.locals.is_empty() {
+        lines.push(Line::from("  (no locals)"));
+    } else {
+        for (idx, entry) in symbols.locals.iter().enumerate() {
+            let is_selected = matches!(symbols.selected_section, SymbolSection::Locals)
+                && symbols.selected_index == idx;
+
+            let content = format!("  {}: {}", idx, entry.value_preview);
+            let mut line = Line::from(content);
+
+            if is_selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+
+            lines.push(line);
+        }
+    }
+
+    lines.push(Line::from("")); // Empty line separator
+
+    // Globals section
+    lines.push(Line::from("globals:"));
+
+    if symbols.globals.is_empty() {
+        lines.push(Line::from("  (no globals)"));
+    } else {
+        for (idx, entry) in symbols.globals.iter().enumerate() {
+            let is_selected = matches!(symbols.selected_section, SymbolSection::Globals)
+                && symbols.selected_index == idx;
+
+            let content = format!("  {}: {}", idx, entry.value_preview);
+            let mut line = Line::from(content);
+
+            if is_selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+
+            lines.push(line);
+        }
+    }
+
+    let block = theme.panel_block_focus(" Symbols ", panel == focus);
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.panel_text).bg(theme.bg))
         .block(block);
