@@ -192,6 +192,10 @@ pub struct AppState {
     pub symbol_index_mode: SymbolIndexMode,
     warned_stale_binary: bool,
     pub verbose: bool,
+
+    // New fields for popup management
+    pub show_symbols_popup: bool,
+    pub last_main_focus: Focus,
 }
 
 impl AppState {
@@ -222,6 +226,10 @@ impl AppState {
             symbol_index_mode,
             warned_stale_binary: false,
             verbose,
+
+            // Initialize popup state
+            show_symbols_popup: false,
+            last_main_focus: Focus::Source,
         }
     }
 

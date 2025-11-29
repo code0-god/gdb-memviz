@@ -1,6 +1,6 @@
 use crate::tui::{
     state::{
-        AppState, Focus, PaneId, PaneNode, SourceViewState, SplitDir, SymbolSection,
+        AppState, PaneId, SourceViewState, SymbolSection,
         SymbolsViewState,
     },
     theme::Theme,
@@ -8,52 +8,23 @@ use crate::tui::{
 use ratatui::{
     prelude::*,
     text::Line,
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use std::collections::HashMap;
 
-const STATUS_TEXT: &str = " gdb-memviz TUI (T0.1 skeleton) · sample.c (placeholder) · q: quit ";
+/// Calculate the floating popup rect for Symbols panel (bottom-right of VM area)
+fn symbols_popup_rect(vm_area: Rect) -> Rect {
+    // width: 40% of vm_area width
+    let width = vm_area.width * 40 / 100;
+    // height: minimum 6 lines, maximum half of vm_area height
+    let min_h = 6;
+    let max_h = vm_area.height / 2;
+    let height = std::cmp::max(min_h, max_h);
 
-pub fn collect_pane_rects(node: &PaneNode, area: Rect, out: &mut HashMap<PaneId, Rect>) {
-    match node {
-        PaneNode::Leaf(id) => {
-            out.insert(*id, area);
-        }
-        PaneNode::Split {
-            dir,
-            ratio,
-            first,
-            second,
-        } => {
-            let (first_area, second_area) = match dir {
-                SplitDir::Vertical => {
-                    let w1 = area.width * (*ratio as u16) / 100;
-                    let w2 = area.width - w1;
-                    (
-                        Rect { width: w1, ..area },
-                        Rect {
-                            x: area.x + w1,
-                            width: w2,
-                            ..area
-                        },
-                    )
-                }
-                SplitDir::Horizontal => {
-                    let h1 = area.height * (*ratio as u16) / 100;
-                    let h2 = area.height - h1;
-                    (
-                        Rect { height: h1, ..area },
-                        Rect {
-                            y: area.y + h1,
-                            height: h2,
-                            ..area
-                        },
-                    )
-                }
-            };
-            collect_pane_rects(first, first_area, out);
-            collect_pane_rects(second, second_area, out);
-        }
+    Rect {
+        x: vm_area.x + vm_area.width.saturating_sub(width),
+        y: vm_area.y + vm_area.height.saturating_sub(height),
+        width,
+        height,
     }
 }
 
@@ -65,82 +36,128 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     f.render_widget(Clear, size);
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), size);
 
+    // 3-tier layout: header / main / command line
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // main area
+            Constraint::Length(1), // command line
+        ])
         .split(size);
 
-    let status_area = layout[0];
+    let header_area = layout[0];
     let main_area = layout[1];
+    let cmd_area = layout[2];
 
-    // Compute pane rectangles from the pane tree
-    let mut pane_map = HashMap::new();
-    collect_pane_rects(&app.layout.root, main_area, &mut pane_map);
+    // Render header
+    render_header(f, theme, header_area, app);
 
-    let source_area = pane_map[&PaneId::Source];
-    let vm_area = pane_map[&PaneId::VmCanvas];
-    let symbols_area = pane_map[&PaneId::Symbols];
-    let detail_area = pane_map[&PaneId::Detail];
+    // Split main area into Source (left) and VM (right)
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(60), // left: Source
+            Constraint::Percentage(40), // right: VM
+        ])
+        .split(main_area);
 
-    let status_block = theme.status_block();
-    let status = Paragraph::new(STATUS_TEXT)
-        .style(
-            Style::default()
-                .fg(theme.status_fg)
-                .bg(theme.status_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(status_block);
-    f.render_widget(status, status_area);
+    let source_area = main_chunks[0];
+    let vm_area = main_chunks[1];
 
+    // Render Source and VM panels
     render_source_panel(
         f,
         theme,
         source_area,
-        PaneId::Source,
-        app.focus,
+        app.focus == PaneId::Source,
         &app.source,
     );
 
-    render_panel(
+    render_vm_panel(
         f,
         theme,
         vm_area,
-        " VM Layout ",
-        PaneId::VmCanvas,
-        app.focus,
+        app.focus == PaneId::VmCanvas,
         &app.vm.lines,
         app.vm.scroll_y,
     );
 
-    render_symbols_panel(
-        f,
-        theme,
-        symbols_area,
-        PaneId::Symbols,
-        app.focus,
-        &app.symbols,
-    );
+    // Render Symbols popup if visible
+    if app.show_symbols_popup {
+        let popup_area = symbols_popup_rect(vm_area);
+        f.render_widget(Clear, popup_area);
+        render_symbols_panel(
+            f,
+            theme,
+            popup_area,
+            app.focus == PaneId::Symbols,
+            &app.symbols,
+        );
+    }
 
-    render_panel(
-        f,
-        theme,
-        detail_area,
-        " Detail (placeholder) ",
-        PaneId::Detail,
-        app.focus,
-        &app.detail.lines,
-        app.detail.scroll_y,
-    );
+    // Render command line
+    render_cmdline(f, theme, cmd_area);
 }
 
-fn render_panel(
+/// Render header status bar
+fn render_header(f: &mut Frame, theme: &Theme, area: Rect, app: &AppState) {
+    let mode = "NORMAL";
+    let focus_name = match app.focus {
+        PaneId::Source => "Source",
+        PaneId::VmCanvas => "VM",
+        PaneId::Symbols => "Symbols",
+        PaneId::Detail => "Detail",
+    };
+
+    let filename = app
+        .source
+        .filename
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("(no file)");
+
+    let line = app
+        .source
+        .current_line
+        .map(|l| format!(":{}", l))
+        .unwrap_or_default();
+
+    let arch = app.debugger.arch.as_deref().unwrap_or("unknown");
+    let sym_mode = match app.symbol_index_mode {
+        crate::symbols::SymbolIndexMode::None => "none",
+        crate::symbols::SymbolIndexMode::DebugOnly => "debug-only",
+        crate::symbols::SymbolIndexMode::DebugAndNonDebug => "all",
+    };
+
+    let status_text = format!(
+        "gdb-memviz TUI  [{}]  focus={}  {}{}  {}  sym={}",
+        mode, focus_name, filename, line, arch, sym_mode
+    );
+
+    let header = Paragraph::new(status_text).style(
+        Style::default()
+            .fg(theme.status_fg)
+            .bg(theme.status_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    f.render_widget(header, area);
+}
+
+/// Render command line
+fn render_cmdline(f: &mut Frame, theme: &Theme, area: Rect) {
+    let cmd = Paragraph::new(":").style(Style::default().fg(theme.panel_text).bg(theme.bg));
+    f.render_widget(cmd, area);
+}
+
+/// Render VM panel
+fn render_vm_panel(
     f: &mut Frame,
     theme: &Theme,
     area: Rect,
-    title: &str,
-    panel: Focus,
-    focus: Focus,
+    focused: bool,
     lines: &[String],
     scroll_y: u16,
 ) {
@@ -148,7 +165,7 @@ fn render_panel(
     f.render_widget(Clear, area);
 
     let text = lines.join("\n");
-    let block = theme.panel_block_focus(title, panel == focus);
+    let block = bordered_block(" VM Layout ", theme, focused);
     let para = Paragraph::new(text)
         .style(Style::default().fg(theme.panel_text).bg(theme.bg))
         .block(block)
@@ -157,12 +174,25 @@ fn render_panel(
     f.render_widget(para, area);
 }
 
+/// Helper to create a bordered block with focus styling
+fn bordered_block<'a>(title: &'a str, _theme: &Theme, focused: bool) -> Block<'a> {
+    let style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(style)
+}
+
 fn render_source_panel(
     f: &mut Frame,
     theme: &Theme,
     area: Rect,
-    panel: Focus,
-    focus: Focus,
+    focused: bool,
     source: &SourceViewState,
 ) {
     // Clear the panel area first
@@ -195,7 +225,7 @@ fn render_source_panel(
         " Source ".to_string()
     };
 
-    let block = theme.panel_block_focus(&title, panel == focus);
+    let block = bordered_block(&title, theme, focused);
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.panel_text).bg(theme.bg))
         .block(block);
@@ -207,8 +237,7 @@ fn render_symbols_panel(
     f: &mut Frame,
     theme: &Theme,
     area: Rect,
-    panel: Focus,
-    focus: Focus,
+    focused: bool,
     symbols: &SymbolsViewState,
 ) {
     // Clear the panel area first
@@ -260,7 +289,7 @@ fn render_symbols_panel(
         }
     }
 
-    let block = theme.panel_block_focus(" Symbols ", panel == focus);
+    let block = bordered_block(" Symbols ", theme, focused);
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.panel_text).bg(theme.bg))
         .block(block);

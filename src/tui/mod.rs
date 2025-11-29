@@ -23,7 +23,7 @@ pub mod theme;
 pub mod ui;
 
 use crate::mi::MiSession;
-use state::{AppState, Focus, PaneNode, SplitDir, SymbolSection};
+use state::{AppState, PaneId, SymbolSection};
 use std::path::PathBuf;
 
 pub fn run_tui(
@@ -167,8 +167,17 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         return true;
     }
 
-    // 2) Symbols panel: quick switch between locals/globals with 'l' / 'g'
-    if press_or_repeat && key.modifiers.is_empty() && matches!(app.focus, state::PaneId::Symbols) {
+    // 2) Escape: Close popup if open
+    if press_or_repeat && key.code == KeyCode::Esc {
+        if app.show_symbols_popup && app.focus == PaneId::Symbols {
+            app.show_symbols_popup = false;
+            app.focus = app.last_main_focus;
+            return false;
+        }
+    }
+
+    // 3) Symbols panel: quick switch between locals/globals with 'l' / 'g'
+    if press_or_repeat && key.modifiers.is_empty() && matches!(app.focus, PaneId::Symbols) {
         match key.code {
             KeyCode::Char('l') => {
                 app.symbols.selected_section = SymbolSection::Locals;
@@ -186,28 +195,37 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         }
     }
 
-    // 3) Ctrl + h/j/k/l for focus movement
+    // 4) Ctrl + h/l/s for focus movement and popup toggle
     if press_or_repeat && key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Char('h') => move_focus_dir(app, Direction::Left),
-            KeyCode::Char('j') => move_focus_dir(app, Direction::Down),
-            KeyCode::Char('k') => move_focus_dir(app, Direction::Up),
-            KeyCode::Char('l') => move_focus_dir(app, Direction::Right),
-
-            // Resize: Ctrl + arrows
-            KeyCode::Left => resize_current(app, SplitDir::Vertical, -5),
-            KeyCode::Right => resize_current(app, SplitDir::Vertical, 5),
-            KeyCode::Up => resize_current(app, SplitDir::Horizontal, -5),
-            KeyCode::Down => resize_current(app, SplitDir::Horizontal, 5),
+            KeyCode::Char('h') => {
+                // Focus Source
+                app.focus = PaneId::Source;
+                app.last_main_focus = PaneId::Source;
+                return false;
+            }
+            KeyCode::Char('l') => {
+                // Focus VM
+                app.focus = PaneId::VmCanvas;
+                app.last_main_focus = PaneId::VmCanvas;
+                return false;
+            }
+            KeyCode::Char('s') => {
+                // Toggle Symbols popup
+                if app.show_symbols_popup {
+                    // Close popup
+                    app.show_symbols_popup = false;
+                    app.focus = app.last_main_focus;
+                } else {
+                    // Open popup
+                    app.show_symbols_popup = true;
+                    app.last_main_focus = app.focus;
+                    app.focus = PaneId::Symbols;
+                }
+                return false;
+            }
             _ => {}
         }
-        return false;
-    }
-
-    // 4) Reset layout (no modifier): =
-    if press_or_repeat && key.code == KeyCode::Char('=') {
-        app.layout = state::LayoutState::default();
-        return false;
     }
 
     // 5) F5: Step over (next) -- ignore key repeats to avoid skipping lines.
@@ -242,38 +260,6 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
     false
 }
 
-#[derive(Copy, Clone)]
-enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-fn move_focus_dir(app: &mut AppState, dir: Direction) {
-    use state::PaneId::*;
-    app.focus = match (app.focus, dir) {
-        // Top row: Source | VmCanvas
-        (Source, Direction::Right) => VmCanvas,
-        (Source, Direction::Down) => Symbols,
-        (VmCanvas, Direction::Left) => Source,
-        (VmCanvas, Direction::Down) => Detail,
-
-        // Bottom row: Symbols | Detail
-        (Symbols, Direction::Up) => Source,
-        (Symbols, Direction::Right) => Detail,
-        (Detail, Direction::Up) => VmCanvas,
-        (Detail, Direction::Left) => Symbols,
-
-        // No change for invalid directions
-        (cur, _) => cur,
-    };
-}
-
-fn resize_current(app: &mut AppState, dir: SplitDir, delta: i8) {
-    adjust_ratio_recursive(&mut app.layout.root, app.focus, dir, delta);
-}
-
 fn clamp_symbol_selection(app: &mut AppState) {
     let len = match app.symbols.selected_section {
         SymbolSection::Locals => app.symbols.locals.len(),
@@ -286,33 +272,7 @@ fn clamp_symbol_selection(app: &mut AppState) {
     }
 }
 
-fn adjust_ratio_recursive(node: &mut PaneNode, target: Focus, dir: SplitDir, delta: i8) -> bool {
-    match node {
-        PaneNode::Leaf(id) => *id == target,
-        PaneNode::Split {
-            dir: my_dir,
-            ratio,
-            first,
-            second,
-        } => {
-            let first_has = adjust_ratio_recursive(first, target, dir, delta);
-            let second_has = adjust_ratio_recursive(second, target, dir, delta);
-
-            if first_has || second_has {
-                if *my_dir == dir {
-                    let r = *ratio as i16 + delta as i16;
-                    *ratio = r.clamp(20, 80) as u8;
-                }
-                true
-            } else {
-                false
-            }
-        }
-    }
-}
-
 fn scroll_focus(app: &mut AppState, delta: i16) {
-    use state::PaneId;
     match app.focus {
         PaneId::Source => {
             let max = max_scroll(&app.source.lines) as u32;
@@ -336,6 +296,7 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
             app.vm.scroll_y = apply_scroll(app.vm.scroll_y, delta, max);
         }
         PaneId::Detail => {
+            // Detail panel is not rendered in the new layout, but keep for compatibility
             let max = max_scroll(&app.detail.lines);
             app.detail.scroll_y = apply_scroll(app.detail.scroll_y, delta, max);
         }

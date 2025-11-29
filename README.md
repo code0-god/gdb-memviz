@@ -47,21 +47,32 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 
 ## TUI (Experimental)
 
-`gdb-memviz`는 gdb/MI 기반 CLI 도구를 기본으로 하지만, 터미널 기반 TUI도 실험적으로 개발 중입니다. 현재 상태는 **TUI T0.1** 수준으로, 다음과 같은 골격을 제공합니다.
+`gdb-memviz`는 gdb/MI 기반 CLI 도구를 기본으로 하지만, 터미널 기반 TUI도 실험적으로 개발 중입니다. 현재 상태는 **TUI T0.2** 수준으로, 다음과 같은 레이아웃을 제공합니다.
 
-- 상단 status bar
-- 좌측 상단: `Source` 패널 (예제 소스 placeholder)
-- 좌측 하단: `Symbols` 패널 (locals/globals placeholder)
-- 우측 상단: `VM Layout` 캔버스 (가상 메모리 레이아웃 placeholder)
-- 우측 하단: `Detail` 패널 (struct/메모리 뷰 placeholder)
-- 패널 포커스/스크롤/리사이즈:
-  - `Ctrl+h/j/k/l`: 포커스 이동 (vim 스타일)
-  - `Ctrl+←/→`: 좌/우 컬럼 비율 조정
-  - `Ctrl+↑/↓`: 상/하 패널 비율 조정(해당 컬럼 내)
-  - `=`: 레이아웃 리셋
-  - `Up/Down/PageUp/PageDown`: 포커스된 패널 스크롤/선택 이동
-  - `q`: 종료
-  - VS Code 통합 터미널에서 `Ctrl+화살표`가 가로채지면 키바인딩을 해제/변경하거나 외부 터미널을 사용하세요.
+### 레이아웃 구조
+- **헤더**: 상태 정보 한 줄 (모드, 포커스, 파일명:라인, 아키텍처, 심볼 모드)
+- **본문**:
+  - 좌측 (60%): `Source` 패널 - 소스 코드 뷰 (실제 파일 표시, PC 위치 표시)
+  - 우측 (40%): `VM Layout` 패널 - 가상 메모리 레이아웃 (placeholder)
+- **커맨드라인**: 하단에 `:` 프롬프트 (향후 명령 입력용, 현재는 표시만)
+- **Symbols 팝업**: `Ctrl+s`로 토글되는 플로팅 창 (우측 하단에 오버레이)
+
+### 키바인딩
+- **포커스 이동**:
+  - `Ctrl+h`: Source 패널에 포커스
+  - `Ctrl+l`: VM Layout 패널에 포커스
+  - `Ctrl+s`: Symbols 팝업 열기/닫기 (열면 자동으로 Symbols에 포커스)
+  - `Esc`: Symbols 팝업 닫기 (이전 포커스로 복귀)
+- **스크롤**:
+  - `Up/Down`: 포커스된 패널 한 줄씩 스크롤 (Symbols에서는 항목 선택 이동)
+  - `PageUp/PageDown`: 포커스된 패널 여러 줄 스크롤
+- **Symbols 패널 내** (Symbols 팝업이 열려 있을 때):
+  - `l`: locals 섹션으로 전환
+  - `g`: globals 섹션으로 전환
+- **디버깅**:
+  - `F5`: Step over (next)
+- **종료**:
+  - `q` 또는 `Ctrl+c`: TUI 종료
 
 ### Run TUI (experimental)
 
@@ -81,7 +92,7 @@ gcc -g examples/sample.c -o examples/sample
 cargo run -- --tui ./examples/sample
 ```
 
-> TUI 모드는 아직 **디버깅 데이터가 완전히 연결되기 전 단계**이며, placeholder 레이아웃과 패널 구조, 포커스/스크롤/리사이즈 등 UI 골격만 제공합니다. 이후 단계에서 CLI의 `locals`, `globals`, `vm`, `view`, `mem` 정보를 TUI 패널에 바인딩할 예정입니다.
+> **현재 상태**: Source 패널은 실제 소스 파일을 표시하고 PC 위치(▶)를 표시합니다. Symbols 팝업은 실제 locals/globals 데이터를 표시하며, 항목 선택 및 섹션 전환이 가능합니다. F5로 step over를 실행하면 실시간으로 UI가 업데이트됩니다. VM Layout은 아직 placeholder 단계입니다. 이후 단계에서 VM 캔버스, Detail 뷰, 명령 입력 등을 추가할 예정입니다.
 
 ## Build & Run
 ```bash
