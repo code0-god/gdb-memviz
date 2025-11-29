@@ -504,8 +504,7 @@ pub(crate) fn parse_symbol_info_variables(
         if let Some(debug_block) = extract_block_after_key(symbols_block, "debug", '[', ']') {
             info.debug = parse_group_list(&debug_block, target_basename);
         }
-        if let Some(nondebug_block) = extract_block_after_key(symbols_block, "nondebug", '[', ']')
-        {
+        if let Some(nondebug_block) = extract_block_after_key(symbols_block, "nondebug", '[', ']') {
             info.nondebug = parse_group_list(&nondebug_block, target_basename);
         }
 
@@ -644,7 +643,10 @@ mod tests {
         let parsed = parse_symbol_info_variables(raw, None);
         assert_eq!(parsed.debug.len(), 2);
         assert_eq!(parsed.nondebug.len(), 1);
-        assert_eq!(parsed.debug[0].filename.as_deref(), Some("../dlfcn/dlerror.h"));
+        assert_eq!(
+            parsed.debug[0].filename.as_deref(),
+            Some("../dlfcn/dlerror.h")
+        );
         assert_eq!(
             parsed.debug[0].symbols[0].description.as_deref(),
             Some("{in braces}")

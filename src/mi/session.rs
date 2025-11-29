@@ -411,17 +411,17 @@ impl MiSession {
                             .unwrap_or(false),
                         is_function_scope: false,
                     };
-                    index.globals_by_file.entry(base.clone()).or_default().push(info);
+                    index
+                        .globals_by_file
+                        .entry(base.clone())
+                        .or_default()
+                        .push(info);
                 }
             }
         }
 
         let t3 = Instant::now();
-        let total: usize = index
-            .globals_by_file
-            .values()
-            .map(|v| v.len())
-            .sum();
+        let total: usize = index.globals_by_file.values().map(|v| v.len()).sum();
 
         log_debug(&format!(
             "[sym] build_symbol_index: debug_files={} nondebug_files={} globals_total={} index_build={} ms",

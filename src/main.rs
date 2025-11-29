@@ -9,9 +9,9 @@ mod vm;
 
 use logger::log_debug;
 use mi::{MiResponse, MiSession, Result};
-use symbols::SymbolIndexMode;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use symbols::SymbolIndexMode;
 
 enum TargetKind {
     Binary { path: PathBuf, args: Vec<String> },

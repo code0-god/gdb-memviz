@@ -54,12 +54,12 @@ pub fn run_tui(
     // Build symbol index once (best effort)
     let symbol_index =
         match session.build_symbol_index(symbol_index_mode, target_basename.as_deref()) {
-        Ok(idx) => Some(idx),
-        Err(e) => {
-            log_debug(&format!("[sym] build_symbol_index failed: {:?}", e));
-            None
-        }
-    };
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                log_debug(&format!("[sym] build_symbol_index failed: {:?}", e));
+                None
+            }
+        };
 
     // Setup terminal
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
