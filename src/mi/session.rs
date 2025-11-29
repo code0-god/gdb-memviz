@@ -341,11 +341,7 @@ impl MiSession {
             text.push('\n');
         }
 
-        Ok(parse_info_variables_output(
-            &text,
-            filter_file,
-            self,
-        ))
+        Ok(parse_info_variables_output(&text, filter_file, self))
     }
 
     /// Evaluate expression and return (type, value) strings.

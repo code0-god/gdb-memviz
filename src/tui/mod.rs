@@ -1,3 +1,4 @@
+use crate::logger::log_debug;
 use crate::mi::Result;
 use crossterm::{
     event::{
@@ -183,16 +184,13 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         match app.debugger.exec_next() {
             Ok(loc) => {
                 if let Err(e) = app.refresh_after_stop(Some(&loc)) {
-                    eprintln!("[tui] refresh_after_stop error: {:?}", e);
+                    log_debug(&format!("[tui] refresh_after_stop error: {:?}", e));
+                    return true; // exit TUI when program ended or gdb errored
                 }
             }
             Err(e) => {
-                let msg = format!("{:?}", e);
-                if msg.contains("not being run") {
-                    eprintln!("[tui] exec_next: program not running, exiting TUI");
-                    return true;
-                }
-                eprintln!("[tui] exec_next error: {:?}", e);
+                log_debug(&format!("[tui] exec_next error: {:?}", e));
+                return true; // exit TUI when execution is over or gdb errored
             }
         }
         return false;
