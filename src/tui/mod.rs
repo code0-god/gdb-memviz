@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::mi::Result;
 use crossterm::{
     event::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -20,19 +20,43 @@ pub mod state;
 pub mod theme;
 pub mod ui;
 
+use crate::mi::MiSession;
 use state::{AppState, Focus, PaneNode, SplitDir};
+use std::path::PathBuf;
 
-pub fn run_tui() -> Result<()> {
+pub fn run_tui(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<()> {
+    // Initialize gdb session
+    let mut session = MiSession::start(gdb_bin, target, args, verbose)?;
+    session.drain_initial_output()?;
+
+    // Run to main and initialize session state
+    session.run_to_main()?;
+    session.ensure_word_size();
+    session.ensure_arch();
+    session.ensure_endian();
+
+    // Setup terminal
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     enable_raw_mode()?;
     if let Err(e) = execute!(terminal.backend_mut(), EnterAlternateScreen) {
         disable_raw_mode().ok();
+        session.shutdown();
         return Err(e.into());
     }
     let keyboard_enhanced = enable_keyboard_enhancement(terminal.backend_mut());
 
-    let mut app = AppState::default();
+    // Create app state with session
+    let mut app = AppState::new(session, PathBuf::from(target));
+
+    // Refresh after initial stop at main
+    if let Err(e) = app.refresh_after_stop() {
+        eprintln!("[tui] refresh_after_stop error: {:?}", e);
+    }
+
     let result = event_loop(&mut terminal, &mut app);
+
+    // Cleanup
+    app.debugger.shutdown();
     let cleanup_result = restore_terminal(&mut terminal, keyboard_enhanced);
 
     result.and(cleanup_result)
@@ -135,7 +159,27 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
         return false;
     }
 
-    // 4) Scrolling (arrows and PageUp/Down)
+    // 4) F5: Step over (next) -- ignore key repeats to avoid skipping lines.
+    if matches!(key.kind, KeyEventKind::Press) && key.code == KeyCode::F(5) {
+        match app.debugger.exec_next() {
+            Ok(_loc) => {
+                if let Err(e) = app.refresh_after_stop() {
+                    eprintln!("[tui] refresh_after_stop error: {:?}", e);
+                }
+            }
+            Err(e) => {
+                let msg = format!("{:?}", e);
+                if msg.contains("not being run") {
+                    eprintln!("[tui] exec_next: program not running, exiting TUI");
+                    return true;
+                }
+                eprintln!("[tui] exec_next error: {:?}", e);
+            }
+        }
+        return false;
+    }
+
+    // 5) Scrolling (arrows and PageUp/Down)
     if !press_or_repeat {
         return false;
     }
@@ -211,8 +255,8 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
     use state::PaneId;
     match app.focus {
         PaneId::Source => {
-            let max = max_scroll(&app.source.lines);
-            app.source.scroll_y = apply_scroll(app.source.scroll_y, delta, max);
+            let max = max_scroll(&app.source.lines) as u32;
+            app.source.scroll_top = apply_scroll_u32(app.source.scroll_top, delta, max);
         }
         PaneId::Symbols => {
             if app.symbols.lines.is_empty() {
@@ -242,4 +286,9 @@ fn max_scroll(lines: &[String]) -> u16 {
 fn apply_scroll(current: u16, delta: i16, max: u16) -> u16 {
     let new_val = current as i32 + delta as i32;
     new_val.clamp(0, max as i32) as u16
+}
+
+fn apply_scroll_u32(current: u32, delta: i16, max: u32) -> u32 {
+    let new_val = current as i32 + delta as i32;
+    new_val.clamp(0, max as i32) as u32
 }

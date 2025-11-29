@@ -255,6 +255,9 @@ pub(crate) fn parse_stopped(line: &str) -> StoppedLocation {
     let file = Regex::new(r#"file="([^"]+)""#)
         .ok()
         .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
+    let fullname = Regex::new(r#"fullname="([^"]+)""#)
+        .ok()
+        .and_then(|re| re.captures(line).map(|c| c[1].to_string()));
     let line_no = Regex::new(r#"line="([0-9]+)""#)
         .ok()
         .and_then(|re| re.captures(line).and_then(|c| c[1].parse::<u32>().ok()));
@@ -264,6 +267,7 @@ pub(crate) fn parse_stopped(line: &str) -> StoppedLocation {
     StoppedLocation {
         func,
         file,
+        fullname,
         line: line_no,
         reason,
         arch,

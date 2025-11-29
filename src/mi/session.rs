@@ -14,6 +14,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 const MAX_DUMP_BYTES: usize = 512;
 const VAR_CREATE_AUTO: &str = "-";
 
+#[derive(Debug)]
 pub struct MiSession {
     child: Child,
     stdin: ChildStdin,

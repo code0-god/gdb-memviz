@@ -1,9 +1,10 @@
 use crate::tui::{
-    state::{AppState, Focus, PaneId, PaneNode, SplitDir},
+    state::{AppState, Focus, PaneId, PaneNode, SourceViewState, SplitDir},
     theme::Theme,
 };
 use ratatui::{
     prelude::*,
+    text::Line,
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 use std::collections::HashMap;
@@ -89,15 +90,13 @@ pub fn draw(f: &mut Frame, app: &AppState) {
         .block(status_block);
     f.render_widget(status, status_area);
 
-    render_panel(
+    render_source_panel(
         f,
         theme,
         source_area,
-        " Source ",
         PaneId::Source,
         app.focus,
-        &app.source.lines,
-        app.source.scroll_y,
+        &app.source,
     );
 
     render_panel(
@@ -155,4 +154,50 @@ fn render_panel(
         .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0));
     f.render_widget(para, area);
+}
+
+fn render_source_panel(
+    f: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    panel: Focus,
+    focus: Focus,
+    source: &SourceViewState,
+) {
+    // Clear the panel area first
+    f.render_widget(Clear, area);
+
+    let height = area.height.saturating_sub(2); // Subtract borders
+    let start = source.scroll_top as usize;
+    let end = (start as u32 + height as u32) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, text) in source.lines.iter().enumerate().take(end).skip(start) {
+        let line_no = (i + 1) as u32;
+        let is_pc = source.current_line == Some(line_no);
+
+        let prefix = if is_pc { "▶ " } else { "  " };
+        let content = format!("{:4} {}{}", line_no, prefix, text);
+
+        let mut line = Line::from(content);
+        if is_pc {
+            line = line.style(Style::default().add_modifier(Modifier::BOLD));
+        }
+
+        lines.push(line);
+    }
+
+    let title = if let Some(path) = &source.filename {
+        format!(" Source: {} ", path.display())
+    } else {
+        " Source ".to_string()
+    };
+
+    let block = theme.panel_block_focus(&title, panel == focus);
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.panel_text).bg(theme.bg))
+        .block(block);
+
+    f.render_widget(paragraph, area);
 }

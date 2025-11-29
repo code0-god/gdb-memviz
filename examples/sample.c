@@ -43,7 +43,7 @@ int main(int argc, char **argv)
     struct Node node2 = {2, 30, "node2", NULL};
     struct Pad pad = {'p', 10, 2, "pt", NULL};
     struct Node *heap_node = malloc(sizeof(struct Node));
-    
+
     if (heap_node)
     {
         heap_node->id = 99;

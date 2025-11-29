@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     }
 
     if tui_mode {
-        return tui::run_tui().map_err(|e| e.into());
+        return tui::run_tui(&gdb_bin, &target, &target_args, verbose);
     }
 
     println!(

@@ -31,6 +31,7 @@ pub struct MemoryDump {
 pub struct StoppedLocation {
     pub func: Option<String>,
     pub file: Option<String>,
+    pub fullname: Option<String>,
     pub line: Option<u32>,
     pub reason: Option<String>,
     pub arch: Option<String>,
