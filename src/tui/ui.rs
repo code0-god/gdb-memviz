@@ -11,18 +11,23 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-/// Calculate the floating popup rect for Symbols panel (bottom-right of VM area)
-fn symbols_popup_rect(vm_area: Rect) -> Rect {
-    // width: 40% of vm_area width
-    let width = vm_area.width * 40 / 100;
-    // height: minimum 6 lines, maximum half of vm_area height
+/// Calculate the floating popup rect for Symbols panel (top-right of Source area)
+fn symbols_popup_rect(source_area: Rect, _vm_area: Rect, width_cols: u16) -> Rect {
+    // width: absolute column count, clamped to source_area width
+    let width = width_cols.min(source_area.width.saturating_sub(2));
+    // height: minimum 6 lines, maximum 40% of source_area height
     let min_h = 6;
-    let max_h = vm_area.height / 2;
+    let max_h = source_area.height * 40 / 100;
     let height = std::cmp::max(min_h, max_h);
 
+    // x: Source's right edge minus width (right-aligned within Source)
+    let x = source_area.x + source_area.width.saturating_sub(width);
+    // y: Source's top edge (top-aligned)
+    let y = source_area.y;
+
     Rect {
-        x: vm_area.x + vm_area.width.saturating_sub(width),
-        y: vm_area.y + vm_area.height.saturating_sub(height),
+        x,
+        y,
         width,
         height,
     }
@@ -53,12 +58,15 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     // Render header
     render_header(f, theme, header_area, app);
 
-    // Split main area into Source (left) and VM (right)
+    // Split main area into Source (left) and VM (right) using adjustable ratio
+    let left_pct = app.main_split.min(90); // safety clamp
+    let right_pct = 100 - left_pct;
+
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(60), // left: Source
-            Constraint::Percentage(40), // right: VM
+            Constraint::Percentage(left_pct),  // left: Source
+            Constraint::Percentage(right_pct), // right: VM
         ])
         .split(main_area);
 
@@ -85,7 +93,7 @@ pub fn draw(f: &mut Frame, app: &AppState) {
 
     // Render Symbols popup if visible
     if app.show_symbols_popup {
-        let popup_area = symbols_popup_rect(vm_area);
+        let popup_area = symbols_popup_rect(source_area, vm_area, app.symbols_popup_width);
         f.render_widget(Clear, popup_area);
         render_symbols_panel(
             f,

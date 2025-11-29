@@ -196,6 +196,12 @@ pub struct AppState {
     // New fields for popup management
     pub show_symbols_popup: bool,
     pub last_main_focus: Focus,
+
+    /// 좌측(Source) 영역 비율 (0~100), 기본 60%
+    pub main_split: u16,
+
+    /// Symbols 팝업 너비 (칼럼 수), 기본 40칼럼
+    pub symbols_popup_width: u16,
 }
 
 impl AppState {
@@ -230,7 +236,39 @@ impl AppState {
             // Initialize popup state
             show_symbols_popup: false,
             last_main_focus: Focus::Source,
+
+            // Initialize main split ratio
+            main_split: 60,
+
+            // Initialize symbols popup width
+            symbols_popup_width: 40,
         }
+    }
+
+    /// Adjust the main split ratio between Source (left) and VM (right)
+    pub fn adjust_main_split(&mut self, delta: i16) {
+        let mut v = self.main_split as i16 + delta;
+        // Clamp between 30% and 80% to avoid extreme squishing
+        if v < 30 {
+            v = 30;
+        }
+        if v > 80 {
+            v = 80;
+        }
+        self.main_split = v as u16;
+    }
+
+    /// Adjust the Symbols popup width (in columns)
+    pub fn adjust_symbols_popup_width(&mut self, delta: i16) {
+        let mut v = self.symbols_popup_width as i16 + delta;
+        // Clamp between 20 and 120 columns
+        if v < 20 {
+            v = 20;
+        }
+        if v > 120 {
+            v = 120;
+        }
+        self.symbols_popup_width = v as u16;
     }
 
     /// Refresh TUI state after gdb stops (at breakpoint, step, etc.)

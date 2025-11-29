@@ -224,6 +224,26 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
                 }
                 return false;
             }
+            KeyCode::Left => {
+                // If Symbols popup is focused, adjust popup width
+                // Otherwise, adjust main split
+                if app.focus == PaneId::Symbols && app.show_symbols_popup {
+                    app.adjust_symbols_popup_width(5); // Expand left
+                } else {
+                    app.adjust_main_split(-5);
+                }
+                return false;
+            }
+            KeyCode::Right => {
+                // If Symbols popup is focused, adjust popup width
+                // Otherwise, adjust main split
+                if app.focus == PaneId::Symbols && app.show_symbols_popup {
+                    app.adjust_symbols_popup_width(-5); // Shrink right
+                } else {
+                    app.adjust_main_split(5);
+                }
+                return false;
+            }
             _ => {}
         }
     }
