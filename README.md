@@ -4,13 +4,6 @@
   Experimental TUI/CLI tool to visualize C/C++ program memory on top of <code>gdb</code>/MI.
 </p>
 
-<p align="center">
-  <!-- Badges (replace <user> if you rename the repo) -->
-  <img src="https://img.shields.io/github/last-commit/code0-god/gdb-memviz?style=flat&logo=git&logoColor=white&color=0080ff" alt="last-commit">
-  <img src="https://img.shields.io/github/languages/top/code0-god/gdb-memviz?style=flat&color=0080ff" alt="top-language">
-  <img src="https://img.shields.io/github/license/code0-god/gdb-memviz?style=flat&color=0080ff" alt="license">
-</p>
-
 ---
 
 > **Status**: early prototype.  
