@@ -91,8 +91,7 @@ fn parse_struct_block(text: &str) -> Option<TypeLayout> {
         .and_then(|re| re.captures(header).map(|c| c[1].to_string()))
         .unwrap_or_else(|| "struct".to_string());
 
-    let offset_re =
-        Regex::new(r"/\*\s*([0-9]+)(?::[0-9]+)?\s*\|\s*([0-9]+)\s*\*/").ok()?;
+    let offset_re = Regex::new(r"/\*\s*([0-9]+)(?::[0-9]+)?\s*\|\s*([0-9]+)\s*\*/").ok()?;
 
     let mut fields = Vec::new();
     let mut total_size: Option<usize> = None;
@@ -184,11 +183,7 @@ fn parse_struct_block(text: &str) -> Option<TypeLayout> {
             .map(|f| f.offset.saturating_add(f.size))
             .unwrap_or(0)
     };
-    Some(TypeLayout::Struct {
-        name,
-        size,
-        fields,
-    })
+    Some(TypeLayout::Struct { name, size, fields })
 }
 
 fn base_type_size(type_name: &str, word_size: usize) -> usize {
@@ -286,9 +281,7 @@ mod tests {
         let text = "type = int [5]";
         let layout = parse_ptype_output(text, 8, 4);
         match layout {
-            TypeLayout::Array {
-                elem_size, len, ..
-            } => {
+            TypeLayout::Array { elem_size, len, .. } => {
                 assert_eq!(elem_size, 4);
                 assert_eq!(len, 5);
             }

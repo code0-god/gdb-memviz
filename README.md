@@ -1,5 +1,31 @@
 # gdb-memviz
-gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시각화하려는 실험용 도구입니다. 현재는 **Phase 2 입구** 정도로, 로컬 변수 + 심볼 단위 메모리 덤프와 타입 기반 레이아웃(`view`)을 지원하며 기본 디버깅 조작(`break/next/step/continue`)도 포함합니다.
+gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시각화하려는 실험용 도구입니다. 현재는 **Phase 2 입구** 정도로, 로컬 변수 + 심볼 단위 메모리 덤프와 타입 기반 레이아웃(`view`)을 지원하며 기본 디버깅 조작(`break/next/step/continue`)도 포함합니다. 최근 변경 사항:
+
+- **키맵 시스템 모듈화** (`src/tui/keymap.rs`):
+  - 키 바인딩을 별도 모듈로 분리하여 관리
+  - 전역 및 컨텍스트별 키맵 지원 (패널별로 다른 키 바인딩 가능)
+  - TUI 상단 상태 바의 키 힌트가 keymap에서 자동 생성 (단일 소스)
+  - Step over 키 변경: `F5` → `n` (더 직관적인 gdb 스타일)
+  - 하나의 액션에 여러 키가 바인딩된 경우 `키1 | 키2 : 동작` 형식으로 표시
+- `--symbol-index-mode` 추가: `debug-only`(기본) / `debug-and-nondebug` / `none`
+- 단일 소스(.c/.cc/.cpp/.cxx) 모드에서는 심볼 인덱스 파싱 시 대상 basename만 파싱하도록 최적화 (glibc 디버그 심볼 대량 파싱을 회피)
+- `--log-file`만 지정해도 로그가 항상 기록됨 (`--verbose`는 stdout 미러용)
+- TUI 소스 패널 전면 정리:
+  - statusline 색상 독립 설정(`file_status_bg`/`file_status_fg`)
+  - PC 마커·스페이서 분리 후 가터부터 하이라이트(배경만 덮어 전경 유지)
+  - 패널 배경을 전체 영역에 채워 누락된 여백 제거
+  - cmdline과 패널 사이 구분선 제거
+  - 테마 파일(`src/tui/theme.rs`)로 syntax/마커/패널/상태라인 색상을 일원화 관리
+- TUI 소스 코드 하이라이트 추가: 간단한 C/C++ 토큰(키워드/타입/문자열/숫자/주석) 컬러링을 `src/tui/highlight.rs`로 적용, 색상 팔레트는 `src/tui/theme.rs`의 `syntax_*` 값으로 조정 가능
+
+## 실행 옵션 요약
+- TUI + 디버그 심볼만(기본, 빠름): `cargo run -- --tui --symbol-index-mode debug-only --log-file perf.log examples/sample.c`
+- TUI + 디버그/논디버그 전체(느림): `cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c`
+- TUI + 심볼 인덱스 스킵: `cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c`
+- 단일 소스 자동 빌드 후 실행(기본 debug-only): `cargo run -- --tui examples/sample.c`
+- 바이너리 직접 실행: `cargo run -- --tui ./path/to/binary`
+- CLI 모드(디버그 심볼만): `cargo run -- --symbol-index-mode debug-only --log-file perf.log examples/sample.c`
+- gdb 경로/추가 로그 예시: `cargo run -- --gdb /usr/bin/gdb --verbose --log-file perf.log --tui examples/sample.c`
 
 ## Requirements
 
@@ -20,7 +46,8 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
   - `vm locate <expr>`: 표현식 주소가 어떤 VM region에 속하는지 표시
   - `vm vars`: locals/globals/포인터 대상 객체를 VM region 별로 묶어 보여줌
 - `help`, `quit`
-- `--gdb <path>` 또는 `GDB=<path>`로 gdb 바이너리 지정, `--verbose`로 MI 송수신 로그를 `stderr`에 출력 (기본 모드는 gdb/MI 잡음 숨김)
+- `--gdb <path>` 또는 `GDB=<path>`로 gdb 바이너리 지정
+- `--verbose` + `--log-file <path>`로 MI/TUI 디버그 로그를 파일에 기록 (TUI 화면은 깔끔하게 유지)
 
 ## Limitations (Phase 2 entry)
 - `mem`은 단순 심볼/간단 표현식을 권장합니다. `mem arr[2]`, `mem node.count` 정도는 동작하지만 복잡한 표현식은 보장하지 않습니다.
@@ -31,6 +58,68 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 - `view`의 struct/array 파서는 단순한 케이스를 대상으로 한 최소 구현입니다. 복잡한 중첩 타입/패딩/얼라인 처리는 향후 확장 예정입니다.
 - 일부 환경에서 gdb의 엔디안 정보를 가져오지 못하면 `layout: unknown-endian`으로 표시될 수 있습니다(동작에는 영향 없음).
 
+## TUI (Experimental)
+
+`gdb-memviz`는 gdb/MI 기반 CLI 도구를 기본으로 하지만, 터미널 기반 TUI도 실험적으로 개발 중입니다. 현재 상태는 **TUI T0.2** 수준으로, 다음과 같은 레이아웃을 제공합니다.
+
+### 레이아웃 구조
+- **헤더**: 상태 정보 한 줄 (모드, 포커스, 파일명:라인, 아키텍처, 심볼 모드)
+- **본문**:
+  - 좌측 (기본 60%, 조정 가능): `Source` 패널 - 소스 코드 뷰 (실제 파일 표시, PC 위치 표시, 간단한 C/C++ 하이라이트, statusline 색상 독립 설정)
+  - 우측 (기본 40%, 조정 가능): `VM Layout` 패널 - 가상 메모리 레이아웃 (placeholder)
+  - `Ctrl+←/→`로 좌우 비율 조정 가능 (30%~80% 범위)
+- **커맨드라인**: 하단에 `:` 프롬프트 (향후 명령 입력용, 현재는 표시만)
+- **Symbols 팝업**: `Ctrl+s`로 토글되는 플로팅 창 (Source 패널 우측 상단에 오버레이, 크기 조정 가능)
+
+### 키바인딩
+
+> **모듈화된 키맵**: 모든 키 바인딩은 `src/tui/keymap.rs`에서 중앙 관리됩니다. 키 바인딩 변경 시 TUI 상단 상태 바의 키 힌트도 자동으로 업데이트됩니다.
+
+- **포커스 이동**:
+  - `Ctrl+h`: Source 패널에 포커스
+  - `Ctrl+l`: VM Layout 패널에 포커스
+  - `Ctrl+s`: Symbols 팝업 열기/닫기 (열면 자동으로 Symbols에 포커스)
+  - `Esc`: Symbols 팝업 닫기 (이전 포커스로 복귀)
+- **레이아웃 조정**:
+  - `Ctrl+←`: Source/VM 경계선 왼쪽 이동 (Source 축소, VM 확대)
+    - Symbols 팝업에 포커스가 있을 때는 팝업을 왼쪽으로 확대 (우측 라인 고정)
+  - `Ctrl+→`: Source/VM 경계선 오른쪽 이동 (Source 확대, VM 축소)
+    - Symbols 팝업에 포커스가 있을 때는 팝업을 오른쪽으로 축소 (우측 라인 고정)
+  - Source/VM 비율 범위: 30%~80%
+  - Symbols 팝업 폭 범위: 20~120 칼럼 (절대값, Source/VM 크기와 독립적)
+- **스크롤**:
+  - `Up/Down`: 포커스된 패널 한 줄씩 스크롤 (Symbols에서는 항목 선택 이동)
+  - `PageUp/PageDown`: 포커스된 패널 여러 줄 스크롤
+- **Symbols 패널 내** (Symbols 팝업이 열려 있을 때):
+  - `l`: locals 섹션으로 전환
+  - `g`: globals 섹션으로 전환
+- **디버깅**:
+  - `n`: Step over (next) - gdb 스타일 키 바인딩
+- **종료**:
+  - `q` 또는 `Ctrl+c`: TUI 종료
+
+**상태 바 키 힌트**: TUI 상단 우측에 주요 키 바인딩이 `키1 | 키2 : 동작` 형식으로 표시됩니다. 예: `Ctrl+h | Ctrl+l : focus`, `Ctrl+c | q : quit`
+
+### Run TUI (experimental)
+
+```bash
+# 단일 소스 전달 시 자동 컴파일(.c/.cc/.cpp/.cxx → <name>-memviz.out)
+# 기본 심볼 모드: debug-only (glibc nondebug 제외, 빠름)
+cargo run -- --tui --log-file perf.log examples/sample.c
+
+# 전체 심볼(디버그+nondebug) 포함: 느리지만 완전
+cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c
+
+# 심볼 인덱스 건너뛰기
+cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c
+
+# 직접 빌드한 바이너리로 실행
+gcc -g examples/sample.c -o examples/sample
+cargo run -- --tui ./examples/sample
+```
+
+> **현재 상태**: Source 패널은 실제 소스 파일을 표시하고 PC 위치(▶)를 표시합니다. Symbols 팝업은 실제 locals/globals 데이터를 표시하며, 항목 선택 및 섹션 전환이 가능합니다. F5로 step over를 실행하면 실시간으로 UI가 업데이트됩니다. VM Layout은 아직 placeholder 단계입니다. 이후 단계에서 VM 캔버스, Detail 뷰, 명령 입력 등을 추가할 예정입니다.
+
 ## Build & Run
 ```bash
 # 예제 C 프로그램 빌드
@@ -39,11 +128,18 @@ gcc -g examples/sample.c -o examples/sample
 # Rust 바이너리 빌드
 cargo build
 
-# gdb-memviz 실행 (기본 gdb 사용, 로그 최소화)
-cargo run -- ./examples/sample
+# gdb-memviz 실행 (기본 gdb 사용, 로그는 파일로 기록)
+cargo run -- --log-file memviz.log ./examples/sample
 
-# gdb 경로 지정/로그 확인 예시
-cargo run -- --gdb /usr/bin/gdb --verbose ./examples/sample
+# 단일 소스 바로 실행 (내부에서 cc -g -O0로 빌드 후 실행, debug-only 심볼 인덱스)
+cargo run -- --tui examples/sample.c
+
+# 심볼 인덱스 모드 조정
+cargo run -- --tui --symbol-index-mode debug-and-nondebug --log-file perf.log examples/sample.c
+cargo run -- --tui --symbol-index-mode none --log-file perf.log examples/sample.c
+
+# gdb 경로 지정/verbose 로그 파일 예시
+cargo run -- --gdb /usr/bin/gdb --verbose --log-file perf.log ./examples/sample
 ```
 
 REPL에서 사용할 수 있는 명령:
@@ -68,3 +164,6 @@ memviz> quit
 - 포인터 체인/링크드 구조 탐색을 통한 재귀적 메모리 뷰
 - VM 전체 레이아웃(text/data/heap/stack) 시각화
 - TUI 또는 Web UI 확장, 명령어 자동완성/히스토리, 스크립트 지원
+- TUI Phase T1: `locals`/`globals`/`vm` 데이터를 패널에 연결
+- TUI Phase T2: VM 캔버스에서 symbol 위치 하이라이트, 포인터 체인 시각화
+- TUI Phase T3: 소스 라인/PC 연동, breakpoint 표시, step/continue 통합

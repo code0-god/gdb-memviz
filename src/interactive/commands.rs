@@ -8,6 +8,7 @@ use crate::mi::{MiSession, Result};
 use crate::types::{is_pointer_type, normalize_type_name, strip_pointer_suffix, TypeLayout};
 use crate::vm::{self, VmLabel};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub enum CommandOutcome {
     Continue,
@@ -148,7 +149,10 @@ fn handle_vm_vars(session: &mut MiSession) {
             return;
         }
     };
-    let globals = match session.list_globals() {
+    let globals_filter = session
+        .current_frame_file()
+        .and_then(|p| Path::new(&p).file_name()?.to_str().map(|s| s.to_string()));
+    let globals = match session.list_globals(globals_filter.as_deref()) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("vm vars: failed to list globals: {}", e);
@@ -158,7 +162,12 @@ fn handle_vm_vars(session: &mut MiSession) {
 
     let mut summaries: HashMap<VmLabel, RegionVarsSummary> = HashMap::new();
 
-    let classify = |addr: u64| regions.iter().find(|r| r.contains(addr)).map(|r| r.label.clone());
+    let classify = |addr: u64| {
+        regions
+            .iter()
+            .find(|r| r.contains(addr))
+            .map(|r| r.label.clone())
+    };
 
     fn get_summary<'a>(
         map: &'a mut HashMap<VmLabel, RegionVarsSummary>,
@@ -231,7 +240,10 @@ fn handle_vm_vars(session: &mut MiSession) {
 }
 
 fn handle_globals(session: &mut MiSession) {
-    let globals = match session.list_globals() {
+    let globals_filter = session
+        .current_frame_file()
+        .and_then(|p| Path::new(&p).file_name()?.to_str().map(|s| s.to_string()));
+    let globals = match session.list_globals(globals_filter.as_deref()) {
         Ok(gs) => gs,
         Err(e) => {
             eprintln!("globals: failed to list globals: {}", e);
@@ -417,9 +429,11 @@ fn type_name(layout: &TypeLayout) -> String {
 }
 
 fn extract_type_line(ptype_text: &str) -> Option<String> {
-    let header = ptype_text
-        .lines()
-        .find_map(|l| l.trim_start().strip_prefix("type =").map(|s| s.trim().to_string()))?;
+    let header = ptype_text.lines().find_map(|l| {
+        l.trim_start()
+            .strip_prefix("type =")
+            .map(|s| s.trim().to_string())
+    })?;
 
     // Drop trailing struct opener if present: "struct Node {" -> "struct Node".
     let mut base = if let Some((head, _)) = header.split_once('{') {
@@ -486,7 +500,9 @@ fn print_help() {
     println!("  locals                - list locals in current frame");
     println!("  globals               - list global/static variables");
     println!("  mem <expr> [len]      - hex+ASCII dump sizeof(<expr>) bytes (capped) at &<expr>; len overrides size");
-    println!("  view <symbol>         - show type-based layout for symbol (struct/array) plus raw dump");
+    println!(
+        "  view <symbol>         - show type-based layout for symbol (struct/array) plus raw dump"
+    );
     println!("  follow <sym> [d]      - follow pointer chain for symbol up to optional depth (default ~8)");
     println!("  vm                    - show process memory map from /proc/<pid>/maps");
     println!("  vm vars               - show locals/globals grouped by VM region");

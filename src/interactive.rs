@@ -1,9 +1,9 @@
 mod commands;
 mod follow;
-mod printers;
+pub mod printers;
 
-use commands::{execute_command, CommandOutcome};
 use crate::mi::{MiSession, Result};
+use commands::{execute_command, CommandOutcome};
 use std::io::{self, Write};
 
 pub fn repl(session: &mut MiSession) -> Result<()> {

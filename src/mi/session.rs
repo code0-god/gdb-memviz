@@ -1,3 +1,4 @@
+use crate::logger::log_debug;
 use crate::mi::models::{
     BreakpointInfo, Endian, GlobalVar, LocalVar, MemoryDump, MiResponse, MiStatus, Result,
     StoppedLocation,
@@ -5,15 +6,18 @@ use crate::mi::models::{
 use crate::mi::parser::{
     bytes_to_u64, guess_endian_from_arch, mi_escape, parse_addr_field, parse_breakpoint,
     parse_endian, parse_locals, parse_memory_contents, parse_status, parse_stopped,
-    parse_type_field, parse_usize, parse_value_field, parse_var_name,
+    parse_symbol_info_variables, parse_type_field, parse_usize, parse_value_field, parse_var_name,
 };
+use crate::symbols::{GlobalVarInfo, GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::types::{parse_ptype_output, TypeLayout};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Instant;
 
 const MAX_DUMP_BYTES: usize = 512;
 const VAR_CREATE_AUTO: &str = "-";
 
+#[derive(Debug)]
 pub struct MiSession {
     child: Child,
     stdin: ChildStdin,
@@ -24,10 +28,20 @@ pub struct MiSession {
     pub endian: Endian,
     pub arch: Option<String>,
     target_hint: String,
+    target_basename: Option<String>,
+    symbol_index_mode: SymbolIndexMode,
+    pub symbol_index: Option<SymbolIndex>,
 }
 
 impl MiSession {
-    pub fn start(gdb_bin: &str, target: &str, args: &[String], verbose: bool) -> Result<Self> {
+    pub fn start(
+        gdb_bin: &str,
+        target: &str,
+        args: &[String],
+        verbose: bool,
+        symbol_index_mode: SymbolIndexMode,
+        target_basename: Option<String>,
+    ) -> Result<Self> {
         // Spawn gdb in MI mode (`-i=mi`) with quiet banner. Target args are passed as-is.
         let mut cmd = Command::new(gdb_bin);
         cmd.arg("-q").arg("-i=mi").arg("--args").arg(target);
@@ -71,6 +85,9 @@ impl MiSession {
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            target_basename,
+            symbol_index_mode,
+            symbol_index: None,
         })
     }
 
@@ -79,7 +96,7 @@ impl MiSession {
         let lines = self.read_until_prompt(false)?;
         if self.verbose {
             for line in lines {
-                eprintln!("[mi<-] {}", line);
+                log_debug(&format!("[mi<-] {}", line));
             }
         }
         self.ensure_endian();
@@ -93,8 +110,8 @@ impl MiSession {
         self.read_response()
     }
 
-    /// Insert breakpoint at main, run, and wait until it stops.
-    pub fn run_to_main(&mut self) -> Result<()> {
+    /// Insert breakpoint at main, run, and wait until it stops. Returns the stop location.
+    pub fn run_to_main(&mut self) -> Result<StoppedLocation> {
         // Best-effort: set a breakpoint on main, run, and block until a stop event arrives.
         let resp = self.exec_command("-break-insert main")?;
         match resp.status {
@@ -108,10 +125,11 @@ impl MiSession {
         if let MiStatus::Error(msg) = resp.status {
             return Err(format!("failed to run: {}", msg).into());
         }
-        if !resp.oob.iter().any(|l| l.starts_with("*stopped")) {
-            self.wait_for_stop()?;
+        if let Some(line) = resp.oob.iter().find(|l| l.starts_with("*stopped")) {
+            return Ok(parse_stopped(line));
         }
-        Ok(())
+        let stop = self.wait_for_stop_capture()?;
+        Ok(stop)
     }
 
     /// Read current frame locals using `-stack-list-locals 2` (includes values).
@@ -227,7 +245,7 @@ impl MiSession {
             _ => {
                 // If gdb cannot answer, assume 64-bit to keep dumps aligned.
                 if self.verbose {
-                    eprintln!("[warn] failed to detect word size; defaulting to 8");
+                    log_debug("[warn] failed to detect word size; defaulting to 8");
                 }
                 self.word_size = 8;
                 self.word_known = true;
@@ -248,11 +266,11 @@ impl MiSession {
                     self.endian = parsed;
                     return;
                 } else if self.verbose {
-                    eprintln!("[warn] could not parse endian from '{}'", val);
+                    log_debug(&format!("[warn] could not parse endian from '{}'", val));
                 }
             }
         } else if self.verbose {
-            eprintln!("[warn] failed to detect endian; leaving Unknown");
+            log_debug("[warn] failed to detect endian; leaving Unknown");
         }
 
         // Try to guess from arch if already known; otherwise default to little.
@@ -286,7 +304,7 @@ impl MiSession {
     /// Try to obtain the inferior process pid from `info proc`.
     pub fn inferior_pid(&mut self) -> Result<u32> {
         let cmd = "-interpreter-exec console \"info proc\"";
-        let resp = self.exec_command(cmd)?;
+        let resp = self.exec_command(&cmd)?;
         let mut text = String::new();
         text.push_str(&resp.result);
         text.push('\n');
@@ -315,71 +333,164 @@ impl MiSession {
         Err("could not determine inferior pid from 'info proc'".into())
     }
 
-    /// List global variables visible to gdb (console-based parsing).
-    pub fn list_globals(&mut self) -> Result<Vec<GlobalVar>> {
-        let cmd = "-interpreter-exec console \"info variables\"";
-        let resp = self.exec_command(cmd)?;
-        let mut text = String::new();
-        text.push_str(&resp.result.replace("\\n", "\n").replace("\\t", "\t"));
-        text.push('\n');
-        for line in &resp.oob {
-            let cleaned = line
-                .trim_start_matches("~\"")
-                .trim_end_matches('"')
-                .replace("\\n", "\n")
-                .replace("\\t", "\t");
-            text.push_str(&cleaned);
-            text.push('\n');
+    /// Get the current frame's source file (fullname or file) if available.
+    pub fn current_frame_file(&mut self) -> Option<String> {
+        let resp = self.exec_command("-stack-info-frame").ok()?;
+        parse_field(&resp.result, "fullname").or_else(|| parse_field(&resp.result, "file"))
+    }
+
+    /// Build and cache symbol index from gdb.
+    pub fn build_symbol_index(
+        &mut self,
+        mode: SymbolIndexMode,
+        target_basename: Option<&str>,
+    ) -> Result<SymbolIndex> {
+        self.symbol_index_mode = mode;
+        if matches!(mode, SymbolIndexMode::None) {
+            log_debug("[sym] build_symbol_index: mode=None, skipping");
+            let idx = SymbolIndex::default();
+            self.symbol_index = Some(idx.clone());
+            return Ok(idx);
         }
 
-        let mut globals = Vec::new();
-        let mut in_file_block = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        let cmd = match mode {
+            SymbolIndexMode::DebugOnly => "-symbol-info-variables",
+            SymbolIndexMode::DebugAndNonDebug => "-symbol-info-variables --include-nondebug",
+            SymbolIndexMode::None => unreachable!(),
+        };
+
+        let t0 = Instant::now();
+        let resp = self.exec_command(cmd)?;
+        let t1 = Instant::now();
+
+        match resp.status.clone() {
+            MiStatus::Error(msg) => {
+                log_debug(&format!("[mi<-sym] {} failed: {}", cmd, msg));
+                return Err(format!("symbol-info-variables failed: {}", msg).into());
             }
-            if trimmed.starts_with("Non-debugging symbols") {
-                break; // stop before libc etc.
-            }
-            if trimmed.starts_with("All defined variables") {
-                continue;
-            }
-            if trimmed.starts_with("File ") || trimmed.ends_with(':') {
-                let header = trimmed
-                    .trim_start_matches("File ")
-                    .trim_end_matches(':')
-                    .trim();
-                if !self.target_hint.is_empty() && !header.contains(&self.target_hint) {
-                    in_file_block = false;
-                } else {
-                    in_file_block = true;
-                }
-                continue;
-            }
-            if !in_file_block {
-                continue;
-            }
-            if !trimmed.contains(';') {
-                continue;
-            }
-            if trimmed.contains('(') {
-                continue; // skip functions
-            }
-            if let Some((type_name, name)) = parse_global_decl(trimmed) {
-                let val = self
-                    .evaluate_expression(&name)
-                    .unwrap_or_else(|_| "<unavailable>".to_string());
-                let addr = self.eval_address_of_expr(&name).unwrap_or(0);
-                globals.push(GlobalVar {
-                    name: name.to_string(),
-                    type_name: type_name.to_string(),
-                    value: val,
-                    address: addr,
-                });
+            _ => {
+                log_debug(&format!(
+                    "[mi<-sym] {} done in {} ms",
+                    cmd,
+                    (t1 - t0).as_millis()
+                ));
             }
         }
+
+        let raw_for_parse = format!("{} {}", resp.result, resp.oob.join(" "));
+        let parsed = parse_symbol_info_variables(
+            &raw_for_parse,
+            target_basename.or(self.target_basename.as_deref()),
+        );
+        let t2 = Instant::now();
+        log_debug(&format!(
+            "[sym] parse_symbol_info_variables in {} ms",
+            (t2 - t1).as_millis()
+        ));
+
+        let mut index = SymbolIndex::default();
+        for group in parsed.debug.iter().chain(parsed.nondebug.iter()) {
+            let file = group.fullname.clone().or_else(|| group.filename.clone());
+            let basename = file
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|os| os.to_str())
+                .map(|s| s.to_owned());
+
+            if let Some(base) = basename {
+                for sym in &group.symbols {
+                    let info = GlobalVarInfo {
+                        name: sym.name.clone(),
+                        type_name: sym.type_name.clone(),
+                        file: file.clone(),
+                        line: sym.line,
+                        is_static: sym
+                            .description
+                            .as_deref()
+                            .map(|d| d.contains("static"))
+                            .unwrap_or(false),
+                        is_function_scope: false,
+                    };
+                    index
+                        .globals_by_file
+                        .entry(base.clone())
+                        .or_default()
+                        .push(info);
+                }
+            }
+        }
+
+        let t3 = Instant::now();
+        let total: usize = index.globals_by_file.values().map(|v| v.len()).sum();
+
+        log_debug(&format!(
+            "[sym] build_symbol_index: debug_files={} nondebug_files={} globals_total={} index_build={} ms",
+            parsed.debug.len(),
+            parsed.nondebug.len(),
+            total,
+            (t3 - t2).as_millis()
+        ));
+        for (file, vars) in &index.globals_by_file {
+            log_debug(&format!("[sym] file={} globals={}", file, vars.len()));
+        }
+
+        self.symbol_index = Some(index.clone());
+        Ok(index)
+    }
+
+    /// List globals using the cached symbol index (building it if needed).
+    pub fn list_globals(&mut self, filter_file: Option<&str>) -> Result<Vec<GlobalVar>> {
+        let index = match self.symbol_index.clone() {
+            Some(idx) => idx,
+            None => self.build_symbol_index(self.symbol_index_mode, None)?,
+        };
+        let vals = self.list_globals_from_index(&index, filter_file)?;
+        let globals = vals
+            .into_iter()
+            .map(|gv| GlobalVar {
+                name: gv.info.name,
+                type_name: gv.info.type_name.unwrap_or_else(|| "unknown".to_string()),
+                value: gv.value,
+                address: gv.address,
+            })
+            .collect();
         Ok(globals)
+    }
+
+    pub fn list_globals_from_index(
+        &mut self,
+        index: &SymbolIndex,
+        filter_file: Option<&str>,
+    ) -> Result<Vec<GlobalVarWithValue>> {
+        let file = match filter_file {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        };
+        let Some(entries) = index.globals_by_file.get(file) else {
+            log_debug(&format!(
+                "[sym] list_globals_from_index: basename={} not found",
+                file
+            ));
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for info in entries {
+            let val = self
+                .evaluate_expression(&info.name)
+                .unwrap_or_else(|_| "<unavailable>".to_string());
+            let addr = self.eval_address_of_expr(&info.name).unwrap_or(0);
+            out.push(GlobalVarWithValue {
+                info: info.clone(),
+                value: val,
+                address: addr,
+            });
+        }
+        log_debug(&format!(
+            "[sym] list_globals_from_index: basename={} -> {} entries",
+            file,
+            out.len()
+        ));
+        Ok(out)
     }
 
     /// Evaluate expression and return (type, value) strings.
@@ -517,6 +628,7 @@ impl MiSession {
 
     /// Wait for a `*stopped` event. Used after run when the initial response did not include it.
     pub fn wait_for_stop(&mut self) -> Result<()> {
+        let mut saw_stop = false;
         loop {
             let mut line = String::new();
             let n = self.stdout.read_line(&mut line)?;
@@ -524,28 +636,30 @@ impl MiSession {
                 return Err("gdb exited unexpectedly".into());
             }
             let trimmed = line.trim().to_string();
-            if trimmed.is_empty() || trimmed == "(gdb)" {
+            if trimmed.is_empty() {
                 continue;
             }
             if self.verbose {
-                eprintln!("[mi<-] {}", trimmed);
+                log_debug(&format!("[mi<-] {}", trimmed));
+            }
+            if trimmed == "(gdb)" {
+                if saw_stop {
+                    return Ok(());
+                }
+                continue;
             }
             if trimmed.starts_with("*stopped") {
                 let loc = parse_stopped(&trimmed);
                 if self.arch.is_none() {
                     self.arch = loc.arch.clone();
                 }
-                break;
+                saw_stop = true;
+                continue;
             }
             if trimmed.starts_with("^error") {
                 return Err(format!("gdb error: {}", trimmed).into());
             }
-            // Echo other out-of-band records to help debugging.
-            if self.verbose {
-                eprintln!("[mi<-] {}", trimmed);
-            }
         }
-        Ok(())
     }
 
     /// Continue execution until next stop.
@@ -590,6 +704,7 @@ impl MiSession {
 
     /// Wait for stopped and parse the location.
     fn wait_for_stop_capture(&mut self) -> Result<StoppedLocation> {
+        let mut stop: Option<StoppedLocation> = None;
         loop {
             let mut line = String::new();
             let n = self.stdout.read_line(&mut line)?;
@@ -597,25 +712,29 @@ impl MiSession {
                 return Err("gdb exited unexpectedly".into());
             }
             let trimmed = line.trim().to_string();
-            if trimmed.is_empty() || trimmed == "(gdb)" {
+            if trimmed.is_empty() {
                 continue;
             }
             if self.verbose {
-                eprintln!("[mi<-] {}", trimmed);
+                log_debug(&format!("[mi<-] {}", trimmed));
+            }
+            if trimmed == "(gdb)" {
+                if let Some(loc) = stop {
+                    return Ok(loc);
+                } else {
+                    continue;
+                }
             }
             if trimmed.starts_with("*stopped") {
                 let loc = parse_stopped(&trimmed);
                 if self.arch.is_none() {
                     self.arch = loc.arch.clone();
                 }
-                return Ok(loc);
+                stop = Some(loc);
+                continue;
             }
             if trimmed.starts_with("^error") {
                 return Err(format!("gdb error: {}", trimmed).into());
-            }
-            // Other async records, echo for visibility.
-            if self.verbose {
-                eprintln!("[mi<-] {}", trimmed);
             }
         }
     }
@@ -630,7 +749,7 @@ impl MiSession {
         let mut line = cmd.to_string();
         line.push('\n');
         if self.verbose {
-            eprintln!("[mi->] {}", cmd);
+            log_debug(&format!("[mi->] {}", cmd));
         }
         self.stdin.write_all(line.as_bytes())?;
         self.stdin.flush()?;
@@ -653,7 +772,7 @@ impl MiSession {
                 continue;
             }
             if self.verbose {
-                eprintln!("[mi<-] {}", trimmed);
+                log_debug(&format!("[mi<-] {}", trimmed));
             }
             if trimmed == "(gdb)" {
                 saw_prompt = true;
@@ -749,10 +868,7 @@ fn parse_address_str(s: &str) -> Option<u64> {
     }
     if let Some(idx) = trimmed.find("0x") {
         let rest = &trimmed[idx + 2..];
-        let hex_part: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_hexdigit())
-            .collect();
+        let hex_part: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
         if !hex_part.is_empty() {
             return u64::from_str_radix(&hex_part, 16).ok();
         }
@@ -764,4 +880,80 @@ fn parse_address_str(s: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn parse_field(s: &str, key: &str) -> Option<String> {
+    let pattern = format!("{}=\"", key);
+    if let Some(start) = s.find(&pattern) {
+        let start = start + pattern.len();
+        if let Some(end) = s[start..].find('"') {
+            return Some(s[start..start + end].to_string());
+        }
+    }
+    None
+}
+
+fn parse_info_variables_output(
+    output: &str,
+    filter_file: Option<&str>,
+    session: &mut MiSession,
+) -> Vec<GlobalVar> {
+    use std::path::Path;
+
+    let filter_basename = filter_file.map(|s| s.to_string());
+    let mut current_file: Option<String> = None;
+    let mut globals = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("Non-debugging symbols") {
+            break;
+        }
+        if trimmed.starts_with("All defined variables") {
+            continue;
+        }
+        if trimmed.starts_with("File ") || trimmed.ends_with(':') {
+            let header = trimmed
+                .trim_start_matches("File ")
+                .trim_end_matches(':')
+                .trim()
+                .to_string();
+            current_file = Some(header);
+            continue;
+        }
+
+        // Filter by current file basename if requested.
+        if let Some(ref filter) = filter_basename {
+            let Some(ref cur) = current_file else {
+                continue;
+            };
+            let cur_base = Path::new(cur)
+                .file_name()
+                .and_then(|os| os.to_str())
+                .unwrap_or(cur);
+            if cur_base != filter {
+                continue;
+            }
+        }
+
+        if !trimmed.contains(';') || trimmed.contains('(') {
+            continue;
+        }
+        if let Some((type_name, name)) = parse_global_decl(trimmed) {
+            let val = session
+                .evaluate_expression(&name)
+                .unwrap_or_else(|_| "<unavailable>".to_string());
+            let addr = session.eval_address_of_expr(&name).unwrap_or(0);
+            globals.push(GlobalVar {
+                name: name.to_string(),
+                type_name: type_name.to_string(),
+                value: val,
+                address: addr,
+            });
+        }
+    }
+    globals
 }

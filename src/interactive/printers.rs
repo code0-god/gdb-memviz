@@ -453,7 +453,10 @@ mod tests {
 
     #[test]
     fn normalize_display_type_handles_pointers_and_arrays() {
-        assert_eq!(super::normalize_display_type("struct Node *"), "struct Node*");
+        assert_eq!(
+            super::normalize_display_type("struct Node *"),
+            "struct Node*"
+        );
         assert_eq!(super::normalize_display_type("int [5]"), "int[5]");
     }
 
