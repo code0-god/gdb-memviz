@@ -1,5 +1,6 @@
 use crate::tui::{
     highlight::{highlight_c_line, CCommentState},
+    keymap::KeyMap,
     state::{AppState, PaneId, SourceViewState, SymbolSection, SymbolsViewState},
     theme::{self, Theme},
 };
@@ -200,17 +201,21 @@ fn render_header(f: &mut Frame, theme: &Theme, area: Rect, app: &AppState) {
         .style(Style::default().bg(theme.status_bg).fg(theme.status_fg));
     f.render_widget(left, header_chunks[0]);
 
-    // Right: key hints
-    let right_text = Line::from(vec![
-        Span::styled("Ctrl+h/l", Style::default().fg(theme.fg_dim)),
-        Span::raw(" focus  "),
-        Span::styled("Ctrl+s", Style::default().fg(theme.fg_dim)),
-        Span::raw(" symbols  "),
-        Span::styled("F5", Style::default().fg(theme.fg_dim)),
-        Span::raw(" next  "),
-        Span::styled("q", Style::default().fg(theme.fg_dim)),
-        Span::raw(" quit"),
-    ]);
+    // Right: key hints - dynamically generated from keymap
+    let keymap = KeyMap::new();
+    let hints = keymap.get_status_hints();
+
+    let mut right_spans = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            right_spans.push(Span::raw("  "));
+        }
+        right_spans.push(Span::styled(key, Style::default().fg(theme.fg_dim)));
+        right_spans.push(Span::raw(" : "));
+        right_spans.push(Span::raw(desc));
+    }
+
+    let right_text = Line::from(right_spans);
 
     let right = Paragraph::new(right_text)
         .alignment(Alignment::Right)
@@ -648,7 +653,7 @@ fn render_symbols_panel(
 
     let block = theme::symbols_popup_block(focused, theme);
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(theme.fg).bg(theme.panel_bg))
+        .style(Style::default().fg(theme.fg).bg(theme.popup_bg))
         .block(block);
 
     f.render_widget(paragraph, area);

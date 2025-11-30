@@ -3,7 +3,7 @@ use crate::mi::Result;
 use crate::symbols::SymbolIndexMode;
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        self, Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -19,11 +19,13 @@ use std::{
 };
 
 pub mod highlight;
+pub mod keymap;
 pub mod state;
 pub mod theme;
 pub mod ui;
 
 use crate::mi::MiSession;
+use keymap::{Action, Key, KeyMap};
 use state::{AppState, PaneId, SymbolSection};
 use std::path::PathBuf;
 
@@ -139,6 +141,8 @@ fn enable_keyboard_enhancement(backend: &mut CrosstermBackend<Stdout>) -> bool {
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut AppState) -> Result<()> {
     let debug_keys = std::env::var("MEMVIZ_TUI_DEBUG_KEYS").is_ok();
+    let keymap = KeyMap::new();
+
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
@@ -148,7 +152,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut AppSt
                 eprintln!("[tui-ev] {:?}", ev);
             }
             if let Event::Key(key_event) = ev {
-                if handle_key(key_event, app) {
+                if handle_key(key_event, app, &keymap) {
                     break;
                 }
             }
@@ -157,125 +161,125 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut AppSt
     Ok(())
 }
 
-fn handle_key(key: KeyEvent, app: &mut AppState) -> bool {
+fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
     let press_or_repeat = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
 
-    // 1) Exit keys
-    if press_or_repeat
-        && (matches!(key.code, KeyCode::Char('q'))
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
-    {
-        return true;
-    }
+    // Special handling for F5 (StepOver): ignore key repeats to avoid skipping lines
+    let press_only = matches!(key.kind, KeyEventKind::Press);
 
-    // 2) Escape: Close popup if open
-    if press_or_repeat && key.code == KeyCode::Esc {
-        if app.show_symbols_popup && app.focus == PaneId::Symbols {
-            app.show_symbols_popup = false;
-            app.focus = app.last_main_focus;
-            return false;
-        }
-    }
+    // Get the key representation
+    let key_input = Key::from_event(&key);
 
-    // 3) Symbols panel: quick switch between locals/globals with 'l' / 'g'
-    if press_or_repeat && key.modifiers.is_empty() && matches!(app.focus, PaneId::Symbols) {
-        match key.code {
-            KeyCode::Char('l') => {
-                app.symbols.selected_section = SymbolSection::Locals;
-                app.symbols.selected_index = 0;
-                clamp_symbol_selection(app);
-                return false;
-            }
-            KeyCode::Char('g') => {
-                app.symbols.selected_section = SymbolSection::Globals;
-                app.symbols.selected_index = 0;
-                clamp_symbol_selection(app);
-                return false;
-            }
-            _ => {}
-        }
-    }
-
-    // 4) Ctrl + h/l/s for focus movement and popup toggle
-    if press_or_repeat && key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('h') => {
-                // Focus Source
-                app.focus = PaneId::Source;
-                app.last_main_focus = PaneId::Source;
-                return false;
-            }
-            KeyCode::Char('l') => {
-                // Focus VM
-                app.focus = PaneId::VmCanvas;
-                app.last_main_focus = PaneId::VmCanvas;
-                return false;
-            }
-            KeyCode::Char('s') => {
-                // Toggle Symbols popup
-                if app.show_symbols_popup {
-                    // Close popup
-                    app.show_symbols_popup = false;
-                    app.focus = app.last_main_focus;
-                } else {
-                    // Open popup
-                    app.show_symbols_popup = true;
-                    app.last_main_focus = app.focus;
-                    app.focus = PaneId::Symbols;
-                }
-                return false;
-            }
-            KeyCode::Left => {
-                // If Symbols popup is focused, adjust popup width
-                // Otherwise, adjust main split
-                if app.focus == PaneId::Symbols && app.show_symbols_popup {
-                    app.adjust_symbols_popup_width(5); // Expand left
-                } else {
-                    app.adjust_main_split(-5);
-                }
-                return false;
-            }
-            KeyCode::Right => {
-                // If Symbols popup is focused, adjust popup width
-                // Otherwise, adjust main split
-                if app.focus == PaneId::Symbols && app.show_symbols_popup {
-                    app.adjust_symbols_popup_width(-5); // Shrink right
-                } else {
-                    app.adjust_main_split(5);
-                }
-                return false;
-            }
-            _ => {}
-        }
-    }
-
-    // 5) F5: Step over (next) -- ignore key repeats to avoid skipping lines.
-    if matches!(key.kind, KeyEventKind::Press) && key.code == KeyCode::F(5) {
-        match app.debugger.exec_next() {
-            Ok(loc) => {
-                if let Err(e) = app.refresh_after_stop(Some(&loc)) {
-                    log_debug(&format!("[tui] refresh_after_stop error: {:?}", e));
-                    return true; // exit TUI when program ended or gdb errored
+    // Look up action in keymap based on current context
+    if let Some(action) = keymap.get_action(&key_input, app.focus) {
+        // Execute the action
+        match action {
+            Action::Quit => {
+                if press_or_repeat {
+                    return true;
                 }
             }
-            Err(e) => {
-                log_debug(&format!("[tui] exec_next error: {:?}", e));
-                return true; // exit TUI when execution is over or gdb errored
+            Action::ClosePopup => {
+                if press_or_repeat {
+                    if app.show_symbols_popup && app.focus == PaneId::Symbols {
+                        app.show_symbols_popup = false;
+                        app.focus = app.last_main_focus;
+                    }
+                }
+            }
+            Action::FocusSource => {
+                if press_or_repeat {
+                    app.focus = PaneId::Source;
+                    app.last_main_focus = PaneId::Source;
+                }
+            }
+            Action::FocusVmCanvas => {
+                if press_or_repeat {
+                    app.focus = PaneId::VmCanvas;
+                    app.last_main_focus = PaneId::VmCanvas;
+                }
+            }
+            Action::ToggleSymbolsPopup => {
+                if press_or_repeat {
+                    if app.show_symbols_popup {
+                        app.show_symbols_popup = false;
+                        app.focus = app.last_main_focus;
+                    } else {
+                        app.show_symbols_popup = true;
+                        app.last_main_focus = app.focus;
+                        app.focus = PaneId::Symbols;
+                    }
+                }
+            }
+            Action::SwitchToLocals => {
+                if press_or_repeat {
+                    app.symbols.selected_section = SymbolSection::Locals;
+                    app.symbols.selected_index = 0;
+                    clamp_symbol_selection(app);
+                }
+            }
+            Action::SwitchToGlobals => {
+                if press_or_repeat {
+                    app.symbols.selected_section = SymbolSection::Globals;
+                    app.symbols.selected_index = 0;
+                    clamp_symbol_selection(app);
+                }
+            }
+            Action::AdjustSplitLeft => {
+                if press_or_repeat {
+                    if app.focus == PaneId::Symbols && app.show_symbols_popup {
+                        app.adjust_symbols_popup_width(5); // Expand left
+                    } else {
+                        app.adjust_main_split(-5);
+                    }
+                }
+            }
+            Action::AdjustSplitRight => {
+                if press_or_repeat {
+                    if app.focus == PaneId::Symbols && app.show_symbols_popup {
+                        app.adjust_symbols_popup_width(-5); // Shrink right
+                    } else {
+                        app.adjust_main_split(5);
+                    }
+                }
+            }
+            Action::StepOver => {
+                if press_only {
+                    match app.debugger.exec_next() {
+                        Ok(loc) => {
+                            if let Err(e) = app.refresh_after_stop(Some(&loc)) {
+                                log_debug(&format!("[tui] refresh_after_stop error: {:?}", e));
+                                return true;
+                            }
+                        }
+                        Err(e) => {
+                            log_debug(&format!("[tui] exec_next error: {:?}", e));
+                            return true;
+                        }
+                    }
+                }
+            }
+            Action::ScrollUp => {
+                if press_or_repeat {
+                    scroll_focus(app, -1);
+                }
+            }
+            Action::ScrollDown => {
+                if press_or_repeat {
+                    scroll_focus(app, 1);
+                }
+            }
+            Action::ScrollPageUp => {
+                if press_or_repeat {
+                    scroll_focus(app, -8);
+                }
+            }
+            Action::ScrollPageDown => {
+                if press_or_repeat {
+                    scroll_focus(app, 8);
+                }
             }
         }
-        return false;
-    }
-
-    // 6) Scrolling (arrows and PageUp/Down)
-    if !press_or_repeat {
-        return false;
-    }
-    match key.code {
-        KeyCode::Up => scroll_focus(app, -1),
-        KeyCode::Down => scroll_focus(app, 1),
-        KeyCode::PageUp => scroll_focus(app, -8),
-        KeyCode::PageDown => scroll_focus(app, 8),
-        _ => {}
     }
 
     false

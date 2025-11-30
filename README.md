@@ -1,6 +1,12 @@
 # gdb-memviz
 gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시각화하려는 실험용 도구입니다. 현재는 **Phase 2 입구** 정도로, 로컬 변수 + 심볼 단위 메모리 덤프와 타입 기반 레이아웃(`view`)을 지원하며 기본 디버깅 조작(`break/next/step/continue`)도 포함합니다. 최근 변경 사항:
 
+- **키맵 시스템 모듈화** (`src/tui/keymap.rs`):
+  - 키 바인딩을 별도 모듈로 분리하여 관리
+  - 전역 및 컨텍스트별 키맵 지원 (패널별로 다른 키 바인딩 가능)
+  - TUI 상단 상태 바의 키 힌트가 keymap에서 자동 생성 (단일 소스)
+  - Step over 키 변경: `F5` → `n` (더 직관적인 gdb 스타일)
+  - 하나의 액션에 여러 키가 바인딩된 경우 `키1 | 키2 : 동작` 형식으로 표시
 - `--symbol-index-mode` 추가: `debug-only`(기본) / `debug-and-nondebug` / `none`
 - 단일 소스(.c/.cc/.cpp/.cxx) 모드에서는 심볼 인덱스 파싱 시 대상 basename만 파싱하도록 최적화 (glibc 디버그 심볼 대량 파싱을 회피)
 - `--log-file`만 지정해도 로그가 항상 기록됨 (`--verbose`는 stdout 미러용)
@@ -66,6 +72,9 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
 - **Symbols 팝업**: `Ctrl+s`로 토글되는 플로팅 창 (Source 패널 우측 상단에 오버레이, 크기 조정 가능)
 
 ### 키바인딩
+
+> **모듈화된 키맵**: 모든 키 바인딩은 `src/tui/keymap.rs`에서 중앙 관리됩니다. 키 바인딩 변경 시 TUI 상단 상태 바의 키 힌트도 자동으로 업데이트됩니다.
+
 - **포커스 이동**:
   - `Ctrl+h`: Source 패널에 포커스
   - `Ctrl+l`: VM Layout 패널에 포커스
@@ -85,9 +94,11 @@ gdb/MI 기반으로 C/C++ 프로그램의 메모리 상태를 텍스트로 시�
   - `l`: locals 섹션으로 전환
   - `g`: globals 섹션으로 전환
 - **디버깅**:
-  - `F5`: Step over (next)
+  - `n`: Step over (next) - gdb 스타일 키 바인딩
 - **종료**:
   - `q` 또는 `Ctrl+c`: TUI 종료
+
+**상태 바 키 힌트**: TUI 상단 우측에 주요 키 바인딩이 `키1 | 키2 : 동작` 형식으로 표시됩니다. 예: `Ctrl+h | Ctrl+l : focus`, `Ctrl+c | q : quit`
 
 ### Run TUI (experimental)
 
