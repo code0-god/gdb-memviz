@@ -134,5 +134,6 @@ pub fn symbols_popup_block<'a>(focused: bool, theme: &Theme) -> Block<'a> {
                 .fg(border_color)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme.panel_bg))
+        // Use popup background so it doesn't inherit the panel card color
+        .style(Style::default().bg(theme.popup_bg))
 }
