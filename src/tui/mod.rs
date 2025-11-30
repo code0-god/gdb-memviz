@@ -3,8 +3,8 @@ use crate::mi::Result;
 use crate::symbols::SymbolIndexMode;
 use crossterm::{
     event::{
-        self, Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -201,12 +201,12 @@ fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
             }
             Action::ToggleSymbolsPopup => {
                 if press_or_repeat {
-                    if app.show_symbols_popup {
-                        app.show_symbols_popup = false;
-                        app.focus = app.last_main_focus;
-                    } else {
+                    if !app.show_symbols_popup {
                         app.show_symbols_popup = true;
                         app.last_main_focus = app.focus;
+                        app.focus = PaneId::Symbols;
+                    } else {
+                        // Already open: just move focus to Symbols without closing
                         app.focus = PaneId::Symbols;
                     }
                 }

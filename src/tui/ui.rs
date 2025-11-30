@@ -421,8 +421,7 @@ fn render_source_panel(
         };
 
         // Pad or truncate the line to remaining width
-        let remaining_width =
-            code_area.width.saturating_sub(marker_width + spacer_width) as usize;
+        let remaining_width = code_area.width.saturating_sub(marker_width + spacer_width) as usize;
         line = pad_or_truncate_line(line, remaining_width);
 
         // Apply background to the gutter+code segment
@@ -438,9 +437,7 @@ fn render_source_panel(
             Rect {
                 x: code_area.x + marker_width + spacer_width,
                 y,
-                width: code_area
-                    .width
-                    .saturating_sub(marker_width + spacer_width),
+                width: code_area.width.saturating_sub(marker_width + spacer_width),
                 height: 1,
             },
         );
@@ -479,9 +476,7 @@ fn render_source_panel(
         )];
         let line = pad_or_truncate_line(
             Line::from(spans),
-            code_area
-                .width
-                .saturating_sub(marker_width + spacer_width) as usize,
+            code_area.width.saturating_sub(marker_width + spacer_width) as usize,
         );
 
         let paragraph = Paragraph::new(line).style(Style::default().bg(theme.panel_bg));
@@ -490,12 +485,35 @@ fn render_source_panel(
             Rect {
                 x: code_area.x + marker_width + spacer_width,
                 y,
-                width: code_area
-                    .width
-                    .saturating_sub(marker_width + spacer_width),
+                width: code_area.width.saturating_sub(marker_width + spacer_width),
                 height: 1,
             },
         );
+    }
+}
+
+/// Format a symbol entry as a C-style statement
+/// Example: "int x = 42" -> "int x = 42;"
+fn format_symbol_as_c(value_preview: &str) -> String {
+    // value_preview is already in format: "type name = value"
+    // We just need to add semicolon
+    format!("{};", value_preview)
+}
+
+/// Truncate a string with ellipsis if it exceeds max_width
+/// Returns the truncated string (without padding)
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if text.len() <= max_width {
+        text.to_string()
+    } else {
+        // Reserve 4 chars for " ..."
+        let available = max_width.saturating_sub(4);
+        if available == 0 {
+            "...".to_string()
+        } else {
+            let truncated: String = text.chars().take(available).collect();
+            format!("{} ...", truncated)
+        }
     }
 }
 
@@ -578,23 +596,46 @@ fn render_symbols_panel(
             let is_selected = matches!(symbols.selected_section, SymbolSection::Locals)
                 && symbols.selected_index == idx;
 
-            let mut content = format!("  {}: {}", idx, entry.value_preview);
+            // Format as C-style statement
+            let c_code = format_symbol_as_c(&entry.value_preview);
 
-            // Pad to full width for full-width highlight
-            if content.len() < inner_width {
-                content.push_str(&" ".repeat(inner_width - content.len()));
+            // Add indentation
+            let indented = format!("  {}", c_code);
+
+            // Truncate if too long (reserve space for padding)
+            let max_text_width = inner_width.saturating_sub(2);
+            let truncated = truncate_with_ellipsis(&indented, max_text_width);
+
+            // Apply C syntax highlighting
+            let mut comment_state = CCommentState::default();
+            let highlighted = highlight_c_line(&truncated, &mut comment_state, theme);
+
+            // Convert spans to owned versions (to avoid lifetime issues)
+            let mut spans: Vec<Span> = highlighted
+                .spans
+                .into_iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style))
+                .collect();
+
+            // Calculate padding needed
+            let content_len: usize = spans.iter().map(|s| s.content.len()).sum();
+            let padding_len = inner_width.saturating_sub(content_len);
+
+            // Add padding to fill the width
+            if padding_len > 0 {
+                let last_style = spans.last().map(|s| s.style).unwrap_or_default();
+                spans.push(Span::styled(" ".repeat(padding_len), last_style));
             }
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.accent_soft)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.fg)
-            };
+            // Apply selection background if needed
+            if is_selected {
+                // Override background for all spans
+                for span in &mut spans {
+                    span.style = span.style.bg(theme.accent_soft);
+                }
+            }
 
-            lines.push(Line::from(Span::styled(content, style)));
+            lines.push(Line::from(spans));
         }
     }
 
@@ -631,23 +672,46 @@ fn render_symbols_panel(
             let is_selected = matches!(symbols.selected_section, SymbolSection::Globals)
                 && symbols.selected_index == idx;
 
-            let mut content = format!("  {}: {}", idx, entry.value_preview);
+            // Format as C-style statement
+            let c_code = format_symbol_as_c(&entry.value_preview);
 
-            // Pad to full width for full-width highlight
-            if content.len() < inner_width {
-                content.push_str(&" ".repeat(inner_width - content.len()));
+            // Add indentation
+            let indented = format!("  {}", c_code);
+
+            // Truncate if too long (reserve space for padding)
+            let max_text_width = inner_width.saturating_sub(2);
+            let truncated = truncate_with_ellipsis(&indented, max_text_width);
+
+            // Apply C syntax highlighting
+            let mut comment_state = CCommentState::default();
+            let highlighted = highlight_c_line(&truncated, &mut comment_state, theme);
+
+            // Convert spans to owned versions (to avoid lifetime issues)
+            let mut spans: Vec<Span> = highlighted
+                .spans
+                .into_iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style))
+                .collect();
+
+            // Calculate padding needed
+            let content_len: usize = spans.iter().map(|s| s.content.len()).sum();
+            let padding_len = inner_width.saturating_sub(content_len);
+
+            // Add padding to fill the width
+            if padding_len > 0 {
+                let last_style = spans.last().map(|s| s.style).unwrap_or_default();
+                spans.push(Span::styled(" ".repeat(padding_len), last_style));
             }
 
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.accent_soft)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.fg)
-            };
+            // Apply selection background if needed
+            if is_selected {
+                // Override background for all spans
+                for span in &mut spans {
+                    span.style = span.style.bg(theme.accent_soft);
+                }
+            }
 
-            lines.push(Line::from(Span::styled(content, style)));
+            lines.push(Line::from(spans));
         }
     }
 

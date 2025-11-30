@@ -41,8 +41,8 @@ pub struct Theme {
     // Gutter markers
     pub pc_marker: Color,         // PC (program counter) marker
     pub breakpoint_marker: Color, // breakpoint marker
-    pub file_status_bg: Color, // optional override for source statusline bg
-    pub file_status_fg: Color, // optional override for source statusline fg
+    pub file_status_bg: Color,    // optional override for source statusline bg
+    pub file_status_fg: Color,    // optional override for source statusline fg
 }
 
 pub const THEME_DARK: Theme = Theme {
@@ -77,7 +77,7 @@ pub const THEME_DARK: Theme = Theme {
     syntax_comment: Color::Rgb(92, 99, 112),   // dim gray
     syntax_identifier: Color::Rgb(171, 178, 191), // default code fg
 
-    pc_marker: Color::Rgb(80, 250, 123),  // PC marker (bright green)
+    pc_marker: Color::Rgb(80, 250, 123), // PC marker (bright green)
     breakpoint_marker: Color::Rgb(255, 85, 85), // breakpoint marker (bright red)
     file_status_bg: Color::Cyan,
     file_status_fg: Color::Black,

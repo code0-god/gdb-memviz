@@ -142,8 +142,9 @@ impl KeyMap {
         self.bind_global(Key::simple(KeyCode::Esc), Action::ClosePopup);
 
         // Focus navigation
-        self.bind_global(Key::ctrl(KeyCode::Char('h')), Action::FocusSource);
-        self.bind_global(Key::ctrl(KeyCode::Char('l')), Action::FocusVmCanvas);
+        // WASD-style (Ctrl-mod) plus existing hjkl variants
+        self.bind_global(Key::ctrl(KeyCode::Char('a')), Action::FocusSource);
+        self.bind_global(Key::ctrl(KeyCode::Char('d')), Action::FocusVmCanvas);
         self.bind_global(Key::ctrl(KeyCode::Char('s')), Action::ToggleSymbolsPopup);
 
         // Layout adjustment
