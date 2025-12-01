@@ -90,6 +90,8 @@ pub fn draw(f: &mut Frame, app: &AppState) {
         app.focus == PaneId::VmCanvas,
         &app.vm.lines,
         app.vm.scroll_y,
+        &app.vm.layout,
+        app.vm.cursor_addr,
     );
 
     // Render Symbols popup if visible

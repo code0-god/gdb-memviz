@@ -122,3 +122,44 @@ pub fn classify_addr(regions: &[VmRegion], addr: u64) -> &'static str {
     }
     "[unknown]"
 }
+
+/// Wrapper around VM regions that provides helper methods for layout and minimap rendering
+#[derive(Debug, Clone)]
+pub struct VmLayout {
+    pub regions: Vec<VmRegion>,
+}
+
+impl VmLayout {
+    /// Create a VmLayout by reading /proc/<pid>/maps
+    pub fn from_proc_maps(pid: u32) -> io::Result<Self> {
+        let regions = read_proc_maps(pid)?;
+        Ok(Self { regions })
+    }
+
+    /// Get the overall address range (min_start, max_end) across all regions
+    /// Returns None if there are no regions
+    pub fn addr_range(&self) -> Option<(u64, u64)> {
+        if self.regions.is_empty() {
+            return None;
+        }
+
+        let min_start = self.regions.iter().map(|r| r.start).min()?;
+        let max_end = self.regions.iter().map(|r| r.end).max()?;
+
+        Some((min_start, max_end))
+    }
+
+    /// Find the region containing the given address
+    /// Returns the first region whose [start, end) contains addr
+    pub fn region_at(&self, addr: u64) -> Option<&VmRegion> {
+        self.regions.iter().find(|r| r.contains(addr))
+    }
+}
+
+impl Default for VmLayout {
+    fn default() -> Self {
+        Self {
+            regions: Vec::new(),
+        }
+    }
+}

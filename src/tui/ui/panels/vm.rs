@@ -1,7 +1,9 @@
 use crate::tui::theme::{self, Theme};
+use crate::tui::ui::widgets::VmMinimap;
+use crate::vm::VmLayout;
 use ratatui::{prelude::*, text::{Line, Span}, widgets::{Clear, Paragraph, Wrap}};
 
-/// Render VM panel with colored region labels
+/// Render VM panel with colored region labels and minimap
 pub fn render_vm_panel(
     f: &mut Frame,
     theme: &Theme,
@@ -9,9 +11,16 @@ pub fn render_vm_panel(
     focused: bool,
     lines: &[String],
     scroll_y: u16,
+    vm_layout: &VmLayout,
+    cursor_addr: Option<u64>,
 ) {
     // Clear the panel area first to avoid stale characters after resize.
     f.render_widget(Clear, area);
+
+    // Create and render the panel block
+    let block = theme::panel_block(" VM Layout ", focused, theme);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     // Process lines to add colors for VM regions
     let mut styled_lines: Vec<Line> = Vec::new();
@@ -50,11 +59,32 @@ pub fn render_vm_panel(
         styled_lines.push(styled_line);
     }
 
-    let block = theme::panel_block(" VM Layout ", focused, theme);
+    // Render the text paragraph in the inner area
     let para = Paragraph::new(styled_lines)
         .style(Style::default().fg(theme.fg).bg(theme.panel_bg))
-        .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0));
-    f.render_widget(para, area);
+    f.render_widget(para, inner);
+
+    // Render the minimap in the top-right corner of the inner area
+    let minimap_width = inner.width.min(18);
+    let minimap_height = inner.height.min(12);
+
+    if minimap_width >= 8 && minimap_height >= 3 {
+        let minimap_area = Rect {
+            x: inner.x + inner.width.saturating_sub(minimap_width),
+            y: inner.y,
+            width: minimap_width,
+            height: minimap_height,
+        };
+
+        let minimap = VmMinimap {
+            layout: vm_layout,
+            cursor_addr,
+            theme,
+        };
+
+        // Render the minimap after the text, so it overlays the text area
+        f.render_widget(minimap, minimap_area);
+    }
 }

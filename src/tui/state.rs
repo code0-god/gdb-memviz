@@ -3,6 +3,7 @@ use crate::mi::{GlobalVar, LocalVar, MiSession, Result, StoppedLocation};
 use crate::symbols::{GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::tui::theme::Theme;
 use crate::types::{normalize_pointer_type, normalize_type_name};
+use crate::vm::VmLayout;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -168,6 +169,8 @@ pub struct SymbolsViewState {
 pub struct VmView {
     pub lines: Vec<String>,
     pub scroll_y: u16,
+    pub layout: VmLayout,
+    pub cursor_addr: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +224,8 @@ impl AppState {
             vm: VmView {
                 lines: split_lines(VM_LAYOUT_PLACEHOLDER),
                 scroll_y: 0,
+                layout: VmLayout::default(),
+                cursor_addr: None,
             },
             detail: DetailView {
                 lines: split_lines(DETAIL_PLACEHOLDER),
