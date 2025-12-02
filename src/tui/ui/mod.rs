@@ -88,8 +88,8 @@ pub fn draw(f: &mut Frame, app: &AppState) {
         theme,
         vm_area,
         app.focus == PaneId::VmCanvas,
-        &app.vm.lines,
-        app.vm.scroll_y,
+        &[],
+        0,
         &app.vm.layout,
         app.vm.cursor_addr,
     );

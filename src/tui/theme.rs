@@ -23,6 +23,12 @@ pub struct Theme {
     pub panel_bg: Color,     // panel background (floating card effect)
     pub panel_shadow: Color, // panel shadow color
     pub separator: Color,    // separator line color
+    pub source_panel_bg: Color, // source panel background
+    pub vm_panel_bg: Color,     // vm panel background
+    pub detail_panel_bg: Color, // detail panel background
+    pub source_panel_border: Color, // source panel border
+    pub vm_panel_border: Color,     // vm panel border
+    pub detail_panel_border: Color, // detail panel border
 
     // VM region colors
     pub vm_stack: Color,
@@ -66,6 +72,12 @@ pub const THEME_DARK: Theme = Theme {
     panel_bg: Color::Rgb(18, 21, 32),
     panel_shadow: Color::Rgb(8, 10, 16),
     separator: Color::Rgb(60, 90, 120),
+    source_panel_bg: Color::Rgb(18, 21, 32),
+    vm_panel_bg: Color::Rgb(18, 21, 32),
+    detail_panel_bg: Color::Rgb(18, 21, 32),
+    source_panel_border: Color::Rgb(80, 80, 100),
+    vm_panel_border: Color::Rgb(80, 80, 100),
+    detail_panel_border: Color::Rgb(240, 200, 20),
 
     vm_stack: Color::Green,
     vm_heap: Color::Cyan,

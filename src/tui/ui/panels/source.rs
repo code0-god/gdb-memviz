@@ -18,7 +18,14 @@ pub fn render_source_panel(
     f.render_widget(Clear, area);
 
     // Render panel block with simple "Source" title
-    let block = theme::panel_block("Source", focused, theme);
+    let mut block = theme::panel_block("Source", focused, theme);
+    // 패널 윤곽선 색상 독립 설정
+    let border_color = if focused {
+        theme.accent
+    } else {
+        theme.source_panel_border
+    };
+    block = block.border_style(Style::default().fg(border_color));
     f.render_widget(block.clone(), area);
     let inner = block.inner(area);
 

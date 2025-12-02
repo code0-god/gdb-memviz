@@ -3,7 +3,7 @@ use crate::vm::{VmBand, VmBandKind, VmLayout};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, BorderType, Borders, Widget},
 };
 
@@ -39,16 +39,23 @@ pub struct VmMinimap<'a> {
     pub cursor_addr: Option<u64>,
     pub theme: &'a Theme,
     pub band_config: VmBandLayoutConfig,
+    pub border_color: Color,
 }
 
 impl<'a> VmMinimap<'a> {
     /// Create a new VmMinimap with default band configuration
-    pub fn new(layout: &'a VmLayout, cursor_addr: Option<u64>, theme: &'a Theme) -> Self {
+    pub fn new(
+        layout: &'a VmLayout,
+        cursor_addr: Option<u64>,
+        theme: &'a Theme,
+        border_color: Color,
+    ) -> Self {
         Self {
             layout,
             cursor_addr,
             theme,
             band_config: VmBandLayoutConfig::default(),
+            border_color,
         }
     }
 }
@@ -64,7 +71,7 @@ impl<'a> Widget for VmMinimap<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(self.theme.border_dim))
+            .border_style(Style::default().fg(self.border_color))
             .style(Style::default().bg(self.theme.panel_bg));
 
         let inner = block.inner(area);

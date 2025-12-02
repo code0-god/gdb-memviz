@@ -317,8 +317,8 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
             app.symbols.selected_index = new_index;
         }
         PaneId::VmCanvas => {
-            let max = max_scroll(&app.vm.lines);
-            app.vm.scroll_y = apply_scroll(app.vm.scroll_y, delta, max);
+            // VM 패널 스크롤은 이후 hexdump 구현 단계에서 처리 예정
+            let _ = delta;
         }
         PaneId::Detail => {
             // Detail panel is not rendered in the new layout, but keep for compatibility
