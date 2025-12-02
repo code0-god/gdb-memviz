@@ -39,7 +39,7 @@ pub fn render_vm_panel(
     // 2) 가로 4분할 (VM map 가변, 나머지 고정 폭)
     let bytes_per_line: u16 = 16;
     let addr_width: u16 = 18;
-    let hex_width: u16 = bytes_per_line * 3 + 1; // 49
+    let hex_width: u16 = bytes_per_line * 3; // 48
     let ascii_width: u16 = bytes_per_line + 1; // 17
     let vm_min_width: u16 = 16;
 
