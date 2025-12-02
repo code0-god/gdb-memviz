@@ -68,9 +68,19 @@ pub fn render_vm_panel(
 
     // Render the minimap in the top-right corner of the inner area
     let minimap_width = inner.width.min(18);
-    let minimap_height = inner.height.min(12);
 
-    if minimap_width >= 8 && minimap_height >= 3 {
+    // Calculate minimap height based on band configuration
+    // Each unit = 1 row, so total rows = sum of all band units
+    use crate::tui::ui::widgets::vm_minimap::VmBandLayoutConfig;
+    let band_config = VmBandLayoutConfig::default();
+    let total_units = band_config.stack + band_config.unalloc1 + band_config.lib
+        + band_config.unalloc2 + band_config.heap + band_config.data + band_config.text;
+
+    // Ideal height = total_units (for bands) + 2 (for borders)
+    let ideal_minimap_height = total_units + 2;
+    let minimap_height = ideal_minimap_height.min(inner.height);
+
+    if minimap_width >= 8 && minimap_height >= 7 {
         let minimap_area = Rect {
             x: inner.x + inner.width.saturating_sub(minimap_width),
             y: inner.y,

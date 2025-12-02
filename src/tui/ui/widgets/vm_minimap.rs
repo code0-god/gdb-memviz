@@ -22,11 +22,11 @@ pub struct VmBandLayoutConfig {
 impl Default for VmBandLayoutConfig {
     fn default() -> Self {
         Self {
-            stack: 2,
+            stack: 1,
             unalloc1: 1,
-            lib: 2,
+            lib: 1,
             unalloc2: 1,
-            heap: 2,
+            heap: 3,
             data: 1,
             text: 1,
         }
@@ -127,11 +127,18 @@ impl<'a> Widget for VmMinimap<'a> {
             let target = ((*units as u32) * (h as u32) / (total_units as u32)) as u16;
             let mut band_h = target.max(1);
 
-            // Ensure total does not exceed h; give all remaining rows to last band
-            if idx == band_units.len() - 1 {
+            // Clamp to remaining rows
+            if band_h > remaining_rows {
                 band_h = remaining_rows;
-            } else if band_h > remaining_rows {
-                band_h = remaining_rows;
+            }
+
+            // For the last band, only use remaining rows if it's within 1 of target
+            // This prevents the last band from expanding too much
+            if idx == band_units.len() - 1 && remaining_rows > 0 {
+                // If there's a small rounding error (1-2 rows), give it to the last band
+                if remaining_rows <= 2 || remaining_rows.abs_diff(target) <= 1 {
+                    band_h = remaining_rows;
+                }
             }
 
             let y0 = inner.y + used_rows;
