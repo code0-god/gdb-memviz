@@ -39,14 +39,25 @@ pub fn render_vm_panel(
     // 2) 가로 4분할 (VM map 가변, 나머지 고정 폭)
     let bytes_per_line: u16 = 16;
     let addr_width: u16 = 18;
-    let hex_width: u16 = bytes_per_line * 3 + 1; // 48
-    let ascii_width: u16 = bytes_per_line + 2; // 18
+    let hex_width: u16 = bytes_per_line * 3 + 1; // 49
+    let ascii_width: u16 = bytes_per_line + 1; // 17
     let vm_min_width: u16 = 16;
+
+    // 총 최소 필요 폭(고정폭 합 + minimap 최소폭) 확보 확인
+    let fixed_total = addr_width + hex_width + ascii_width;
+    if inner.width < fixed_total + vm_min_width {
+        return;
+    }
+
+    let vm_width = inner.width.saturating_sub(fixed_total);
+    if vm_width < vm_min_width {
+        return;
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(vm_min_width),   // VM map (가변)
+            Constraint::Length(vm_width),    // VM map (가변, 최소 확보)
             Constraint::Length(addr_width),  // Address (고정)
             Constraint::Length(hex_width),   // Hex (고정)
             Constraint::Length(ascii_width), // ASCII (고정)

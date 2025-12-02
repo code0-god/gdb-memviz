@@ -9,7 +9,7 @@ use helpers::{inset, symbols_popup_rect};
 use panels::{source::render_source_panel, symbols::render_symbols_panel, vm::render_vm_panel};
 use widgets::{cmdline::render_cmdline, header::render_header};
 
-pub fn draw(f: &mut Frame, app: &AppState) {
+pub fn draw(f: &mut Frame, app: &mut AppState) {
     let theme = theme::theme();
     let full = f.size();
 
@@ -60,8 +60,30 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     }
 
     // Split main area into Source (left) and VM (right) using adjustable ratio
-    let left_pct = app.main_split.min(90); // safety clamp
-    let right_pct = 100 - left_pct;
+    // VM 패널이 요구하는 최소 폭을 보장하도록 split 비율을 조정한다.
+    let vm_fixed_total: u16 = {
+        let bytes_per_line: u16 = 16;
+        let addr_width: u16 = 18;
+        let hex_width: u16 = bytes_per_line * 3 + 1; // 49
+        let ascii_width: u16 = bytes_per_line + 1; // 17
+        addr_width + hex_width + ascii_width + 16 // + minimap 최소폭
+    };
+    let vm_min_outer = vm_fixed_total + 2; // Block border 2칸 고려
+
+    let mut left_pct = app.main_split.min(90); // safety clamp
+    let mut right_pct = 100 - left_pct;
+
+    let vm_width_est = main_area.width.saturating_mul(right_pct as u16) / 100;
+    if vm_width_est < vm_min_outer && main_area.width > 0 {
+        // 필요한 비율을 올림으로 계산
+        let needed = ((vm_min_outer as u32 * 100 + main_area.width as u32 - 1)
+            / main_area.width as u32)
+            .min(100) as u16;
+        right_pct = needed;
+        left_pct = 100u16.saturating_sub(right_pct);
+    }
+    // 실제 적용된 값을 상태에도 반영하여, 최소 폭에서 줄이려는 입력이 누적되지 않도록 한다.
+    app.main_split = left_pct;
 
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
