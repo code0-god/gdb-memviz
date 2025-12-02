@@ -78,11 +78,7 @@ pub fn render_vm_panel(
             height: minimap_height,
         };
 
-        let minimap = VmMinimap {
-            layout: vm_layout,
-            cursor_addr,
-            theme,
-        };
+        let minimap = VmMinimap::new(vm_layout, cursor_addr, theme);
 
         // Render the minimap after the text, so it overlays the text area
         f.render_widget(minimap, minimap_area);

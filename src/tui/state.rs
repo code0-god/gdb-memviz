@@ -276,6 +276,42 @@ impl AppState {
         self.symbols_popup_width = v as u16;
     }
 
+    /// Refresh the VM layout (used by the minimap) from the current inferior process
+    pub fn refresh_vm_layout_from_session(&mut self) {
+        // Try to get PID from gdb
+        let pid = match self.debugger.inferior_pid() {
+            Ok(pid) => pid,
+            Err(err) => {
+                // Log error but don't clear the layout - keep showing old data
+                crate::logger::log_debug(&format!(
+                    "[vm] failed to get inferior pid for VM layout: {:?}",
+                    err
+                ));
+                return;
+            }
+        };
+
+        // Try to read /proc/<pid>/maps
+        match self.vm.layout.refresh_from_pid(pid) {
+            Ok(()) => {
+                if self.verbose {
+                    crate::logger::log_debug(&format!(
+                        "[vm] refreshed VM layout from pid {}: {} regions",
+                        pid,
+                        self.vm.layout.regions.len()
+                    ));
+                }
+            }
+            Err(err) => {
+                crate::logger::log_debug(&format!(
+                    "[vm] failed to read /proc/{}/maps for VM layout: {:?}",
+                    pid, err
+                ));
+                // Keep old layout on error
+            }
+        }
+    }
+
     /// Refresh TUI state after gdb stops (at breakpoint, step, etc.)
     pub fn refresh_after_stop(&mut self, stopped: Option<&StoppedLocation>) -> Result<()> {
         let t0 = Instant::now();
@@ -298,13 +334,16 @@ impl AppState {
         let t2 = Instant::now();
         self.update_symbols(&frame)?;
         let t3 = Instant::now();
+        self.refresh_vm_layout_from_session();
+        let t4 = Instant::now();
 
         if self.verbose {
             crate::logger::log_debug(&format!(
-                "[tui] refresh_after_stop: frame={}ms, source={}ms, symbols={}ms",
+                "[tui] refresh_after_stop: frame={}ms, source={}ms, symbols={}ms, vm={}ms",
                 (t1 - t0).as_millis(),
                 (t2 - t1).as_millis(),
-                (t3 - t2).as_millis()
+                (t3 - t2).as_millis(),
+                (t4 - t3).as_millis()
             ));
         }
 

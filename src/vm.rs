@@ -89,10 +89,14 @@ pub fn read_proc_maps(pid: u32) -> io::Result<Vec<VmRegion>> {
 fn classify_region_label(perms: &str, pathname: &str) -> VmLabel {
     let path = pathname.trim();
 
+    // Handle special [xxx] mappings first
     if path == "[heap]" {
         VmLabel::Heap
     } else if path == "[stack]" {
         VmLabel::Stack
+    } else if path.starts_with('[') && path.ends_with(']') {
+        // Other bracketed regions like [vdso], [vvar], etc.
+        VmLabel::Other(path.to_string())
     } else if path.is_empty() {
         VmLabel::Anonymous
     } else if path.contains("lib") || path.contains(".so") {
@@ -123,6 +127,42 @@ pub fn classify_addr(regions: &[VmRegion], addr: u64) -> &'static str {
     "[unknown]"
 }
 
+/// Aggregated span for a given conceptual label, used by the VM minimap.
+/// This is intentionally coarser than individual VmRegion entries.
+#[derive(Debug, Clone)]
+pub struct LabelSpan {
+    pub label: VmLabel,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Conceptual bands for the VM minimap, ordered high → low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VmBandKind {
+    /// Top-of-user-space stack segment.
+    Stack,
+    /// Unallocated region between Stack and Lib (if any).
+    Unallocated1,
+    /// Memory-mapped region: shared libraries, anon mappings, etc.
+    Lib,
+    /// Unallocated region between Lib and Heap (if any).
+    Unallocated2,
+    /// Heap segment.
+    Heap,
+    /// Data/BSS.
+    Data,
+    /// Text / code segment.
+    Text,
+}
+
+/// A band with an optional address span.
+/// If span is None, that conceptual band has no concrete range in this process.
+#[derive(Debug, Clone)]
+pub struct VmBand {
+    pub kind: VmBandKind,
+    pub span: Option<(u64, u64)>, // [start, end)
+}
+
 /// Wrapper around VM regions that provides helper methods for layout and minimap rendering
 #[derive(Debug, Clone)]
 pub struct VmLayout {
@@ -134,6 +174,13 @@ impl VmLayout {
     pub fn from_proc_maps(pid: u32) -> io::Result<Self> {
         let regions = read_proc_maps(pid)?;
         Ok(Self { regions })
+    }
+
+    /// Refresh this layout in-place from /proc/<pid>/maps
+    pub fn refresh_from_pid(&mut self, pid: u32) -> io::Result<()> {
+        let regions = read_proc_maps(pid)?;
+        self.regions = regions;
+        Ok(())
     }
 
     /// Get the overall address range (min_start, max_end) across all regions
@@ -153,6 +200,138 @@ impl VmLayout {
     /// Returns the first region whose [start, end) contains addr
     pub fn region_at(&self, addr: u64) -> Option<&VmRegion> {
         self.regions.iter().find(|r| r.contains(addr))
+    }
+
+    /// Group regions by VmLabel and compute a single [start,end) span for each label.
+    /// - All VmLabel::Other(..) are merged into one `Other("")` label.
+    /// - Returns spans sorted by center address (low to high).
+    pub fn label_spans(&self) -> Vec<LabelSpan> {
+        use std::collections::HashMap;
+
+        // Canonicalize labels so that all Other(..) map to the same key.
+        fn canonical_label(label: &VmLabel) -> VmLabel {
+            match label {
+                VmLabel::Other(_) => VmLabel::Other(String::new()),
+                other => other.clone(),
+            }
+        }
+
+        let mut map: HashMap<VmLabel, (u64, u64)> = HashMap::new();
+
+        for region in &self.regions {
+            let key = canonical_label(&region.label);
+            let entry = map.entry(key).or_insert((region.start, region.end));
+            entry.0 = entry.0.min(region.start);
+            entry.1 = entry.1.max(region.end);
+        }
+
+        let mut spans: Vec<LabelSpan> = map
+            .into_iter()
+            .filter_map(|(label, (start, end))| {
+                if start < end {
+                    Some(LabelSpan { label, start, end })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by center address (low → high).
+        spans.sort_by_key(|s| (s.start + s.end) / 2);
+
+        spans
+    }
+
+    /// Compute conceptual VM bands (high → low) for the minimap.
+    /// The order is fixed: Stack, Unallocated1, Lib, Unallocated2, Heap, Data, Text.
+    /// Each band carries an optional [start,end) span in real addresses.
+    pub fn bands(&self) -> Vec<VmBand> {
+        let text = aggregate_span(&self.regions, |r| matches!(r.label, VmLabel::Text));
+        let data = aggregate_span(&self.regions, |r| matches!(r.label, VmLabel::Data));
+        let heap = aggregate_span(&self.regions, |r| matches!(r.label, VmLabel::Heap));
+        let stack = aggregate_span(&self.regions, |r| matches!(r.label, VmLabel::Stack));
+
+        // Lib band aggregates Lib + Anonymous + Other (mmap-like) regions.
+        let lib = aggregate_span(&self.regions, |r| {
+            matches!(
+                r.label,
+                VmLabel::Lib | VmLabel::Anonymous | VmLabel::Other(_)
+            )
+        });
+
+        // Unallocated2: between Lib and Heap (low side)
+        let unalloc2 = match (heap, lib) {
+            (Some((heap_start, _heap_end)), Some((_lib_start, lib_end))) => {
+                if heap_start > lib_end {
+                    Some((lib_end, heap_start))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        // Unallocated1: between Stack and Lib (high side)
+        let unalloc1 = match (stack, lib) {
+            (Some((stack_start, _stack_end)), Some((lib_start, _lib_end))) => {
+                if stack_start > lib_start {
+                    Some((lib_start, stack_start))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        vec![
+            VmBand {
+                kind: VmBandKind::Stack,
+                span: stack,
+            },
+            VmBand {
+                kind: VmBandKind::Unallocated1,
+                span: unalloc1,
+            },
+            VmBand {
+                kind: VmBandKind::Lib,
+                span: lib,
+            },
+            VmBand {
+                kind: VmBandKind::Unallocated2,
+                span: unalloc2,
+            },
+            VmBand {
+                kind: VmBandKind::Heap,
+                span: heap,
+            },
+            VmBand {
+                kind: VmBandKind::Data,
+                span: data,
+            },
+            VmBand {
+                kind: VmBandKind::Text,
+                span: text,
+            },
+        ]
+    }
+}
+
+/// Helper to aggregate regions matching a predicate into a single span.
+fn aggregate_span<F>(regions: &[VmRegion], pred: F) -> Option<(u64, u64)>
+where
+    F: Fn(&VmRegion) -> bool,
+{
+    let mut start: Option<u64> = None;
+    let mut end: Option<u64> = None;
+
+    for r in regions.iter().filter(|r| pred(r)) {
+        start = Some(start.map_or(r.start, |s| s.min(r.start)));
+        end = Some(end.map_or(r.end, |e| e.max(r.end)));
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) if s < e => Some((s, e)),
+        _ => None,
     }
 }
 

@@ -1,22 +1,61 @@
 use crate::tui::theme::Theme;
-use crate::vm::{VmLabel, VmLayout};
+use crate::vm::{VmBand, VmBandKind, VmLayout};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Block, BorderType, Borders, Widget},
 };
 
-/// VM minimap widget that visualizes memory regions as a vertical bar
+/// Relative heights (in "units") for each conceptual band.
+#[derive(Debug, Clone, Copy)]
+pub struct VmBandLayoutConfig {
+    pub stack: u16,
+    pub unalloc1: u16,
+    pub lib: u16,
+    pub unalloc2: u16,
+    pub heap: u16,
+    pub data: u16,
+    pub text: u16,
+}
+
+impl Default for VmBandLayoutConfig {
+    fn default() -> Self {
+        Self {
+            stack: 2,
+            unalloc1: 1,
+            lib: 2,
+            unalloc2: 1,
+            heap: 2,
+            data: 1,
+            text: 1,
+        }
+    }
+}
+
+/// VM minimap widget that visualizes memory regions as a canonical band layout
 pub struct VmMinimap<'a> {
     pub layout: &'a VmLayout,
     pub cursor_addr: Option<u64>,
     pub theme: &'a Theme,
+    pub band_config: VmBandLayoutConfig,
+}
+
+impl<'a> VmMinimap<'a> {
+    /// Create a new VmMinimap with default band configuration
+    pub fn new(layout: &'a VmLayout, cursor_addr: Option<u64>, theme: &'a Theme) -> Self {
+        Self {
+            layout,
+            cursor_addr,
+            theme,
+            band_config: VmBandLayoutConfig::default(),
+        }
+    }
 }
 
 impl<'a> Widget for VmMinimap<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Handle edge cases: zero-size area or empty layout
+        // Handle edge cases: zero-size area
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -36,85 +75,140 @@ impl<'a> Widget for VmMinimap<'a> {
             return;
         }
 
-        // Get the overall address range
-        let (vm_min, vm_max) = match self.layout.addr_range() {
-            Some(range) => range,
-            None => {
-                // No regions, render a placeholder message
-                self.render_empty_state(inner, buf);
-                return;
-            }
-        };
-
-        let total = vm_max.saturating_sub(vm_min);
-        if total == 0 {
+        // Get conceptual bands
+        let bands = self.layout.bands();
+        if bands.is_empty() {
+            // No regions, render a placeholder message
+            self.render_empty_state(inner, buf);
             return;
         }
 
-        // Determine if any region contains the cursor
-        let cursor_region = self
-            .cursor_addr
-            .and_then(|addr| self.layout.region_at(addr));
+        // Map from kind → &VmBand for quick lookup
+        use std::collections::HashMap;
+        let mut band_map = HashMap::new();
+        for band in &bands {
+            band_map.insert(band.kind, band);
+        }
 
-        // Render each region as a vertical slice
-        for region in &self.layout.regions {
-            // Calculate the vertical position of this region
-            let start_rel = (region.start.saturating_sub(vm_min)) as f64 / total as f64;
-            let end_rel = (region.end.saturating_sub(vm_min)) as f64 / total as f64;
+        // Collect (band_kind, units) in fixed high→low order
+        let cfg = self.band_config;
+        let band_units: &[(VmBandKind, u16)] = &[
+            (VmBandKind::Stack, cfg.stack),
+            (VmBandKind::Unallocated1, cfg.unalloc1),
+            (VmBandKind::Lib, cfg.lib),
+            (VmBandKind::Unallocated2, cfg.unalloc2),
+            (VmBandKind::Heap, cfg.heap),
+            (VmBandKind::Data, cfg.data),
+            (VmBandKind::Text, cfg.text),
+        ];
 
-            let y0 = (start_rel * inner.height as f64).floor() as u16;
-            let y1 = (end_rel * inner.height as f64).ceil() as u16;
+        let total_units: u16 = band_units.iter().map(|(_, u)| *u).sum();
+        if total_units == 0 {
+            return;
+        }
 
-            // Clamp to inner area height
-            let y0 = y0.min(inner.height.saturating_sub(1));
-            let y1 = y1.min(inner.height);
+        let h = inner.height;
+        if h == 0 {
+            return;
+        }
 
-            // Get the color for this region type
-            let bg_color = self.region_color(&region.label);
+        let mut used_rows: u16 = 0;
+        let mut remaining_rows = h;
 
-            // Check if this region should be highlighted (contains cursor)
-            let is_cursor_region = cursor_region
-                .map(|cr| std::ptr::eq(cr, region))
-                .unwrap_or(false);
-
-            let style = if is_cursor_region {
-                // Highlight the cursor region with bold modifier and brighter color
-                Style::default()
-                    .bg(bg_color)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().bg(bg_color)
+        for (idx, (kind, units)) in band_units.iter().enumerate() {
+            // Get the band or create a placeholder with no span
+            let placeholder = VmBand {
+                kind: *kind,
+                span: None,
             };
+            let band = band_map.get(kind).copied().unwrap_or(&placeholder);
 
-            // Fill the region's vertical slice
-            for y in y0..y1 {
-                for x in 0..inner.width {
-                    let cell_x = inner.x + x;
-                    let cell_y = inner.y + y;
+            // Compute this band's height in rows based on units
+            let target = ((*units as u32) * (h as u32) / (total_units as u32)) as u16;
+            let mut band_h = target.max(1);
 
-                    // Ensure we're within buffer bounds
-                    if cell_x < buf.area.right() && cell_y < buf.area.bottom() {
-                        let cell = buf.get_mut(cell_x, cell_y);
-                        cell.set_style(style);
-                        cell.set_char(' '); // Fill with space to show background color
-                    }
-                }
+            // Ensure total does not exceed h; give all remaining rows to last band
+            if idx == band_units.len() - 1 {
+                band_h = remaining_rows;
+            } else if band_h > remaining_rows {
+                band_h = remaining_rows;
+            }
+
+            let y0 = inner.y + used_rows;
+            let y1 = y0.saturating_add(band_h).min(inner.y + h);
+            if y0 >= y1 {
+                break;
+            }
+
+            let is_primary = matches!(
+                band.kind,
+                VmBandKind::Stack | VmBandKind::Heap | VmBandKind::Data | VmBandKind::Text
+            );
+
+            self.draw_band(inner, buf, band, y0, y1, is_primary);
+
+            used_rows += band_h;
+            remaining_rows = h.saturating_sub(used_rows);
+            if remaining_rows == 0 {
+                break;
             }
         }
     }
 }
 
 impl<'a> VmMinimap<'a> {
-    /// Get the background color for a given VM region label
-    fn region_color(&self, label: &VmLabel) -> Color {
-        match label {
-            VmLabel::Text => self.theme.vm_text,
-            VmLabel::Data => self.theme.vm_data,
-            VmLabel::Heap => self.theme.vm_heap,
-            VmLabel::Stack => self.theme.vm_stack,
-            VmLabel::Lib => self.theme.fg_dim,
-            VmLabel::Anonymous => self.theme.border_dim,
-            VmLabel::Other(_) => self.theme.border,
+    /// Draw a single band as a vertical slice in the minimap
+    fn draw_band(
+        &self,
+        inner: Rect,
+        buf: &mut Buffer,
+        band: &VmBand,
+        y_start: u16,
+        y_end: u16,
+        is_primary: bool,
+    ) {
+        if y_start >= y_end || inner.width == 0 {
+            return;
+        }
+
+        // Base color by band kind
+        let mut style = match band.kind {
+            VmBandKind::Stack => Style::default().bg(self.theme.vm_stack),
+            VmBandKind::Heap => Style::default().bg(self.theme.vm_heap),
+            VmBandKind::Data => Style::default().bg(self.theme.vm_data),
+            VmBandKind::Text => Style::default().bg(self.theme.vm_text),
+            VmBandKind::Lib => Style::default().bg(self.theme.fg_dim),
+            VmBandKind::Unallocated1 | VmBandKind::Unallocated2 => {
+                // Use panel background for unallocated (empty space)
+                Style::default().bg(self.theme.panel_bg)
+            }
+        };
+
+        // Dim non-primary bands if desired
+        if !is_primary {
+            style = style.fg(self.theme.fg_dim);
+        }
+
+        // Cursor highlight: bold if cursor_addr lies within band's span
+        if let (Some(addr), Some((start, end))) = (self.cursor_addr, band.span) {
+            if addr >= start && addr < end {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+        }
+
+        // Fill the band's vertical slice
+        for y in y_start..y_end {
+            for x in 0..inner.width {
+                let cell_x = inner.x + x;
+                let cell_y = y;
+
+                // Ensure we're within buffer bounds
+                if cell_x < buf.area.right() && cell_y < buf.area.bottom() {
+                    let cell = buf.get_mut(cell_x, cell_y);
+                    cell.set_char(' '); // Fill with space to show background color
+                    cell.set_style(style);
+                }
+            }
         }
     }
 
