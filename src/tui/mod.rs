@@ -282,6 +282,26 @@ fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
         }
     }
 
+    // VmCanvas 포커스 시 추가 키 처리 (좌우, 페이지 업/다운)
+    if press_or_repeat && app.focus == PaneId::VmCanvas {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match (key.code, key.modifiers) {
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                app.vm_left();
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                app.vm_right();
+            }
+            (KeyCode::Up, KeyModifiers::CONTROL) => {
+                app.vm_page_up();
+            }
+            (KeyCode::Down, KeyModifiers::CONTROL) => {
+                app.vm_page_down();
+            }
+            _ => {}
+        }
+    }
+
     false
 }
 
@@ -317,8 +337,16 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
             app.symbols.selected_index = new_index;
         }
         PaneId::VmCanvas => {
-            // VM 패널 스크롤은 이후 hexdump 구현 단계에서 처리 예정
-            let _ = delta;
+            // VM hexdump 스크롤 (위/아래)
+            if delta < 0 {
+                for _ in 0..(-delta) {
+                    app.vm_move_up();
+                }
+            } else {
+                for _ in 0..delta {
+                    app.vm_move_down();
+                }
+            }
         }
         PaneId::Detail => {
             // Detail panel is not rendered in the new layout, but keep for compatibility

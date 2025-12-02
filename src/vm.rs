@@ -342,3 +342,94 @@ impl Default for VmLayout {
         }
     }
 }
+
+/// VM hexdump 패널 서브 포커스
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmHexPaneFocus {
+    Address,
+    Hex,
+}
+
+/// VM hexdump 뷰 상태 (VM Layout 패널의 Address/Hex/ASCII가 공유하는 상태)
+#[derive(Debug, Clone)]
+pub struct VmHexView {
+    /// 한 줄에 표시할 바이트 수 (일단 16으로 사용)
+    pub bytes_per_line: u16,
+    /// 현재 화면에서 가장 위(첫 줄)에 표시되는 주소 (라인 시작 주소)
+    pub top_addr: u64,
+    /// 현재 선택된 바이트의 주소 (커서)
+    pub cursor_addr: u64,
+    /// 현재 화면에 몇 줄을 그리고 있는지 (렌더 단계에서 채움)
+    pub lines_per_page: u16,
+    /// top_addr 기준으로 읽어 온 원시 메모리 데이터
+    pub buf: Vec<u8>,
+    /// buf 안에서 실제 유효한 바이트 수 (read 실패 등으로 buf.len() 보다 작을 수 있음)
+    pub valid_len: usize,
+    /// 마지막으로 read_memory_bytes 로 로드한 페이지의 시작 주소
+    pub last_loaded_top_addr: u64,
+    /// 마지막으로 로드할 때 사용한 lines_per_page 값
+    pub last_loaded_lines_per_page: u16,
+}
+
+impl VmHexView {
+    pub fn new() -> Self {
+        Self {
+            bytes_per_line: 16,
+            top_addr: 0,
+            cursor_addr: 0,
+            lines_per_page: 0,
+            buf: Vec::new(),
+            valid_len: 0,
+            last_loaded_top_addr: u64::MAX, // 어떤 값과도 다르게 하기 위함
+            last_loaded_lines_per_page: 0,
+        }
+    }
+
+    pub fn page_size(&self) -> usize {
+        (self.bytes_per_line as usize) * (self.lines_per_page as usize)
+    }
+
+    pub fn addr_at(&self, row: u16, col: u16) -> u64 {
+        self.top_addr + (row as u64) * (self.bytes_per_line as u64) + (col as u64)
+    }
+
+    pub fn index_of(&self, addr: u64) -> Option<usize> {
+        if addr < self.top_addr {
+            return None;
+        }
+        let offset = addr - self.top_addr;
+        if offset >= self.valid_len as u64 {
+            None
+        } else {
+            Some(offset as usize)
+        }
+    }
+
+    /// 현재 cursor_addr 가 페이지 안에 있으면 (row, col)를 반환.
+    /// row/col 은 0 기반이며, row < lines_per_page, col < bytes_per_line 일 때만 Some.
+    pub fn cursor_row_col(&self) -> Option<(u16, u16)> {
+        if self.bytes_per_line == 0 || self.lines_per_page == 0 {
+            return None;
+        }
+        let bpl = self.bytes_per_line as u64;
+
+        if self.cursor_addr < self.top_addr {
+            return None;
+        }
+        let diff = self.cursor_addr - self.top_addr;
+        let row = (diff / bpl) as u16;
+        let col = (diff % bpl) as u16;
+
+        if row >= self.lines_per_page {
+            return None;
+        }
+        Some((row, col))
+    }
+
+    /// 현재 페이지 기준 (row, col) 에 해당하는 실제 주소.
+    /// (row, col)은 0 기반이라고 가정.
+    pub fn addr_from_row_col(&self, row: u16, col: u16) -> u64 {
+        let bpl = self.bytes_per_line as u64;
+        self.top_addr + (row as u64) * bpl + (col as u64)
+    }
+}

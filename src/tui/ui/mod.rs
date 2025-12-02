@@ -110,10 +110,7 @@ pub fn draw(f: &mut Frame, app: &mut AppState) {
         theme,
         vm_area,
         app.focus == PaneId::VmCanvas,
-        &[],
-        0,
-        &app.vm.layout,
-        app.vm.cursor_addr,
+        app,
     );
 
     // Render Symbols popup if visible

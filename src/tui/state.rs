@@ -3,7 +3,7 @@ use crate::mi::{GlobalVar, LocalVar, MiSession, Result, StoppedLocation};
 use crate::symbols::{GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::tui::theme::Theme;
 use crate::types::{normalize_pointer_type, normalize_type_name};
-use crate::vm::VmLayout;
+use crate::vm::{VmHexPaneFocus, VmHexView, VmLayout};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -171,6 +171,8 @@ pub struct VmView {
     pub scroll_y: u16,
     pub layout: VmLayout,
     pub cursor_addr: Option<u64>,
+    pub hex: VmHexView,
+    pub sub_focus: VmHexPaneFocus,
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +228,8 @@ impl AppState {
                 scroll_y: 0,
                 layout: VmLayout::default(),
                 cursor_addr: None,
+                hex: VmHexView::new(),
+                sub_focus: VmHexPaneFocus::Hex,
             },
             detail: DetailView {
                 lines: split_lines(DETAIL_PLACEHOLDER),
@@ -505,6 +509,257 @@ impl AppState {
 
         // Keep the current line at the top of the view after a stop.
         self.source.scroll_top = idx;
+    }
+
+    /// 현재 VmHexView 설정(bytes_per_line, lines_per_page, top_addr)에 맞춰
+    /// gdb를 통해 한 페이지 분량의 메모리를 읽어와 vm.hex.buf / valid_len 을 채운다.
+    pub fn refresh_vm_hex_page(&mut self) -> anyhow::Result<()> {
+        // lines_per_page 가 0 이면 아직 렌더링에서 설정되지 않은 상태이므로
+        // 일단 아무 것도 하지 않고 Ok(()) 반환
+        let lines = self.vm.hex.lines_per_page;
+        if lines == 0 {
+            return Ok(());
+        }
+
+        let bpl = self.vm.hex.bytes_per_line.max(1);
+        let page_size = (lines as usize) * (bpl as usize);
+
+        let addr = self.vm.hex.top_addr;
+
+        // 이전 내용은 지워두고 시작
+        self.vm.hex.buf.clear();
+        self.vm.hex.valid_len = 0;
+
+        crate::logger::log_debug(&format!(
+            "[vm] refresh_vm_hex_page: addr=0x{:x}, size={}",
+            addr, page_size
+        ));
+
+        match self.debugger.read_memory_bytes(addr, page_size) {
+            Ok(bytes) => {
+                self.vm.hex.buf = bytes;
+                self.vm.hex.valid_len = self.vm.hex.buf.len();
+            }
+            Err(e) => {
+                crate::logger::log_debug(&format!(
+                    "[vm] memory read failed at 0x{:x}: {:?}",
+                    addr, e
+                ));
+                // 실패해도 페이지 크기만큼 0으로 채워서 화면이 “바뀌었다”는 걸 보장
+                self.vm.hex.buf = vec![0u8; page_size];
+                self.vm.hex.valid_len = 0;
+            }
+        }
+
+        // 어떤 경우든 "이 주소/라인 수로 로드했다"는 사실은 기록해 둔다.
+        self.vm.hex.last_loaded_top_addr = self.vm.hex.top_addr;
+        self.vm.hex.last_loaded_lines_per_page = self.vm.hex.lines_per_page;
+
+        Ok(())
+    }
+
+    // === VM hexdump navigation ===
+
+    fn vm_bpl(&self) -> u64 {
+        self.vm.hex.bytes_per_line as u64
+    }
+
+    fn vm_page_size(&self) -> u64 {
+        self.vm_bpl() * self.vm.hex.lines_per_page as u64
+    }
+
+    fn debug_assert_vm_invariants(&self) {
+        let bpl = self.vm_bpl();
+        let page_size = self.vm_page_size();
+
+        debug_assert!(self.vm.hex.lines_per_page > 0);
+        debug_assert!(bpl > 0);
+
+        let start = self.vm.hex.top_addr;
+        let end = start + page_size;
+
+        debug_assert!(
+            self.vm.hex.cursor_addr >= start && self.vm.hex.cursor_addr < end
+        );
+    }
+
+    pub fn vm_move_up(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        if row > 0 {
+            row -= 1;
+        } else {
+            top = top.saturating_sub(bpl);
+            row = 0;
+        }
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_move_down(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        if row + 1 < rows {
+            row += 1;
+        } else {
+            top = top.saturating_add(bpl);
+            row = rows.saturating_sub(1);
+        }
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    fn vm_move_byte(&mut self, dir: i64) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let mut col = offset % bpl;
+
+        let mut new_row = row as i128;
+        let mut new_col = col as i128 + dir as i128;
+        let bpl_i = bpl as i128;
+
+        while new_col < 0 {
+            new_col += bpl_i;
+            new_row -= 1;
+        }
+        while new_col >= bpl_i {
+            new_col -= bpl_i;
+            new_row += 1;
+        }
+
+        if new_row < 0 {
+            let delta_rows = (-new_row) as u64;
+            top = top.saturating_sub(delta_rows * bpl);
+            new_row = 0;
+        } else if new_row >= rows as i128 {
+            let delta_rows = (new_row as u64).saturating_sub(rows.saturating_sub(1));
+            top = top.saturating_add(delta_rows * bpl);
+            new_row = rows.saturating_sub(1) as i128;
+        }
+
+        row = new_row as u64;
+        col = new_col as u64;
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_left(&mut self) {
+        match self.vm.sub_focus {
+            VmHexPaneFocus::Hex => {
+                if let Some((_row, col)) = self.vm.hex.cursor_row_col() {
+                    if col > 0 {
+                        self.vm_move_byte(-1);
+                    } else {
+                        // Hex 첫 컬럼에서 ← → Address 패널로 포커스만 이동
+                        self.vm.sub_focus = VmHexPaneFocus::Address;
+                    }
+                }
+            }
+            VmHexPaneFocus::Address => {
+                // 왼쪽으로 더 갈 패널이 없으므로 아무 것도 하지 않음
+            }
+        }
+    }
+
+    pub fn vm_right(&mut self) {
+        match self.vm.sub_focus {
+            VmHexPaneFocus::Hex => {
+                // 바이트 하나 오른쪽으로 이동 (페이지 넘으면 vm_move_byte가 처리)
+                self.vm_move_byte(1);
+            }
+            VmHexPaneFocus::Address => {
+                // Address → Hex 첫 컬럼으로 포커스 이동
+                self.vm.sub_focus = VmHexPaneFocus::Hex;
+                if let Some((row, _col)) = self.vm.hex.cursor_row_col() {
+                    self.vm.hex.cursor_addr = self.vm.hex.addr_from_row_col(row, 0);
+                }
+            }
+        }
+    }
+
+    pub fn vm_page_up(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+        let page_size = self.vm_page_size();
+        if page_size == 0 {
+            return;
+        }
+
+        let start = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(start);
+        let row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        self.vm.hex.top_addr = self.vm.hex.top_addr.saturating_sub(page_size);
+        let top = self.vm.hex.top_addr;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_page_down(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+        let page_size = self.vm_page_size();
+        if page_size == 0 {
+            return;
+        }
+
+        let start = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(start);
+        let row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        self.vm.hex.top_addr = self.vm.hex.top_addr.saturating_add(page_size);
+        let top = self.vm.hex.top_addr;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
     }
 }
 

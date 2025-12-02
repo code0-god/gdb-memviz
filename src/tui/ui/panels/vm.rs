@@ -1,10 +1,10 @@
+use crate::tui::state::AppState;
 use crate::tui::theme::{self, Theme};
 use crate::tui::ui::widgets::VmMinimap;
-use crate::vm::VmLayout;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::*,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -15,10 +15,7 @@ pub fn render_vm_panel(
     theme: &Theme,
     area: Rect,
     focused: bool,
-    _lines: &[String],
-    _scroll_y: u16,
-    vm_layout: &VmLayout,
-    cursor_addr: Option<u64>,
+    app: &mut AppState,
 ) {
     // 1) 전체 영역 클리어 후 바깥 패널 렌더
     f.render_widget(Clear, area);
@@ -38,7 +35,7 @@ pub fn render_vm_panel(
 
     // 2) 가로 4분할 (VM map 가변, 나머지 고정 폭)
     let bytes_per_line: u16 = 16;
-    let addr_width: u16 = 18;
+    let addr_width: u16 = 20;
     let hex_width: u16 = bytes_per_line * 3; // 48
     let ascii_width: u16 = bytes_per_line + 1; // 17
     let vm_min_width: u16 = 16;
@@ -104,41 +101,139 @@ pub fn render_vm_panel(
     f.render_widget(hex_block, hex_area);
     f.render_widget(ascii_block, ascii_area);
 
-    // 4) 더미 데이터 렌더
-    let dummy_addr_lines: Vec<Line> = (0..addr_inner.height)
-        .map(|i| {
-            Line::from(Span::raw(format!(
-                "{:016x}",
-                0x0000aaaa0000u64 + i as u64 * bytes_per_line as u64
-            )))
-        })
-        .collect();
-    let addr_para = Paragraph::new(dummy_addr_lines)
-        .style(Style::default().fg(theme.fg).bg(theme.panel_bg));
+    // 4) lines_per_page 설정
+    let lines_per_page = addr_inner.height as u16;
+    app.vm.hex.lines_per_page = lines_per_page;
+
+    // top_addr가 0이고 VM 영역이 있다면 첫 region 시작 주소로 초기화
+    if app.vm.hex.top_addr == 0 && !app.vm.layout.regions.is_empty() {
+        app.vm.hex.top_addr = app.vm.layout.regions[0].start;
+        app.vm.hex.cursor_addr = app.vm.hex.top_addr;
+    }
+
+    // 필요 시 현재 페이지를 로드
+    let need_refresh = app.vm.hex.buf.is_empty()
+        || app.vm.hex.last_loaded_top_addr != app.vm.hex.top_addr
+        || app.vm.hex.last_loaded_lines_per_page != app.vm.hex.lines_per_page;
+
+    if need_refresh {
+        if let Err(err) = app.refresh_vm_hex_page() {
+            crate::logger::log_debug(&format!(
+                "[vm] refresh_vm_hex_page error: {:?}",
+                err
+            ));
+        }
+    }
+
+    // 5) Address/Hex/ASCII 라인 빌드
+    let bpl = app.vm.hex.bytes_per_line as usize;
+    let cursor_addr = app.vm.hex.cursor_addr;
+    let valid_len = app.vm.hex.valid_len;
+    let buf = &app.vm.hex.buf;
+    let top_addr = app.vm.hex.top_addr;
+
+    let mut addr_lines: Vec<Line> = Vec::new();
+    let mut hex_lines: Vec<Line> = Vec::new();
+    let mut ascii_lines: Vec<Line> = Vec::new();
+
+    for row in 0..(addr_inner.height as usize) {
+        let line_addr = top_addr + (row as u64) * (bpl as u64);
+
+        // 현재 줄에 커서가 있는지 확인
+        let cursor_on_this_line = cursor_addr >= line_addr
+            && cursor_addr < line_addr + (bpl as u64);
+
+        // Address
+        let addr_str = format!("0x{:016x}", line_addr);
+        let addr_style = if cursor_on_this_line {
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.vm_panel_bg)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg).bg(theme.vm_panel_bg)
+        };
+        addr_lines.push(Line::from(Span::styled(addr_str, addr_style)));
+
+        // Hex/ASCII
+        let mut hex_spans: Vec<Span> = Vec::new();
+        let mut ascii_spans: Vec<Span> = Vec::new();
+
+        for col in 0..bpl {
+            let addr = line_addr + (col as u64);
+            let idx = row * bpl + col;
+
+            let byte_opt = if idx < valid_len {
+                Some(buf[idx])
+            } else {
+                None
+            };
+
+            let is_cursor = addr == cursor_addr;
+
+            // 한 바이트에 대한 hex/ASCII 문자열
+            let (hex_str, ascii_ch) = match byte_opt {
+                Some(b) => {
+                    let ch = if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    };
+                    (format!("{:02x}", b), ch)
+                }
+                None => ("..".to_string(), '.'),
+            };
+
+            // 기본 스타일
+            let mut hex_style = Style::default().fg(theme.fg).bg(theme.vm_panel_bg);
+            let mut ascii_style = hex_style;
+
+            if is_cursor {
+                // hex 두 글자와 ASCII 한 글자만 반전
+                hex_style = hex_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+                ascii_style = ascii_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+
+            // hex 두 글자
+            hex_spans.push(Span::styled(hex_str, hex_style));
+            // hex 바이트 사이 공백 (하이라이트하지 않음)
+            if col + 1 < bpl {
+                hex_spans.push(Span::raw(" "));
+            }
+
+            // ascii 한 글자
+            ascii_spans.push(Span::styled(ascii_ch.to_string(), ascii_style));
+        }
+
+        hex_lines.push(Line::from(hex_spans));
+        ascii_lines.push(Line::from(ascii_spans));
+    }
+
+    // Paragraph로 렌더링
+    let addr_para = Paragraph::new(addr_lines)
+        .style(Style::default().fg(theme.fg).bg(theme.vm_panel_bg));
     f.render_widget(addr_para, addr_inner);
 
-    let dummy_hex_line = "00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff";
-    let dummy_hex_lines: Vec<Line> = (0..hex_inner.height)
-        .map(|_| Line::from(Span::raw(dummy_hex_line)))
-        .collect();
-    let hex_para = Paragraph::new(dummy_hex_lines)
-        .style(Style::default().fg(theme.fg).bg(theme.panel_bg));
+    let hex_para = Paragraph::new(hex_lines)
+        .style(Style::default().fg(theme.fg).bg(theme.vm_panel_bg));
     f.render_widget(hex_para, hex_inner);
 
-    let dummy_ascii_line = "................";
-    let dummy_ascii_lines: Vec<Line> = (0..ascii_inner.height)
-        .map(|_| Line::from(Span::raw(dummy_ascii_line)))
-        .collect();
-    let ascii_para = Paragraph::new(dummy_ascii_lines)
-        .style(Style::default().fg(theme.fg).bg(theme.panel_bg));
+    let ascii_para = Paragraph::new(ascii_lines)
+        .style(Style::default().fg(theme.fg).bg(theme.vm_panel_bg));
     f.render_widget(ascii_para, ascii_inner);
 
-    // 5) minimap 렌더 (VM map 영역)
+    // 6) minimap 렌더 (VM map 영역)
+    let minimap_cursor = if app.vm.hex.cursor_addr != 0 {
+        Some(app.vm.hex.cursor_addr)
+    } else {
+        None
+    };
+
     let minimap_border = if focused {
         theme.border
     } else {
         theme.border
     };
-    let minimap = VmMinimap::new(vm_layout, cursor_addr, theme, minimap_border);
+    let minimap = VmMinimap::new(&app.vm.layout, minimap_cursor, theme, minimap_border);
     f.render_widget(minimap, vm_map_area);
 }
