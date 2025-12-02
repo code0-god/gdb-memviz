@@ -160,6 +160,38 @@ impl<'a> Widget for VmMinimap<'a> {
                 break;
             }
         }
+
+        // Draw address range labels outside the minimap bands
+        let label_style = Style::default().fg(self.theme.fg_dim);
+
+        // "high address" at top-left (above Stack band)
+        let high_label = "high address";
+        if area.y < buf.area.bottom() && area.x < buf.area.right() {
+            for (i, ch) in high_label.chars().enumerate() {
+                let x = area.x + i as u16;
+                if x >= buf.area.right() {
+                    break;
+                }
+                let cell = buf.get_mut(x, area.y);
+                cell.set_symbol(&ch.to_string());
+                cell.set_style(label_style);
+            }
+        }
+
+        // "low address" at bottom-left (below Text band)
+        let low_label = "low address";
+        let bottom_y = area.y + area.height.saturating_sub(1);
+        if bottom_y < buf.area.bottom() && area.x < buf.area.right() {
+            for (i, ch) in low_label.chars().enumerate() {
+                let x = area.x + i as u16;
+                if x >= buf.area.right() {
+                    break;
+                }
+                let cell = buf.get_mut(x, bottom_y);
+                cell.set_symbol(&ch.to_string());
+                cell.set_style(label_style);
+            }
+        }
     }
 }
 
@@ -184,10 +216,9 @@ impl<'a> VmMinimap<'a> {
             VmBandKind::Heap => Style::default().bg(self.theme.vm_heap),
             VmBandKind::Data => Style::default().bg(self.theme.vm_data),
             VmBandKind::Text => Style::default().bg(self.theme.vm_text),
-            VmBandKind::Lib => Style::default().bg(self.theme.fg_dim),
+            VmBandKind::Lib => Style::default().bg(self.theme.vm_lib),
             VmBandKind::Unallocated1 | VmBandKind::Unallocated2 => {
-                // Use panel background for unallocated (empty space)
-                Style::default().bg(self.theme.panel_bg)
+                Style::default().bg(self.theme.vm_gap)
             }
         };
 
@@ -214,6 +245,53 @@ impl<'a> VmMinimap<'a> {
                     let cell = buf.get_mut(cell_x, cell_y);
                     cell.set_char(' '); // Fill with space to show background color
                     cell.set_style(style);
+                }
+            }
+        }
+
+        // Draw centered text label for the band
+        let label = match band.kind {
+            VmBandKind::Stack => "Stack",
+            VmBandKind::Unallocated1 => "unallocated",
+            VmBandKind::Lib => "Lib",
+            VmBandKind::Unallocated2 => "unallocated",
+            VmBandKind::Heap => "Heap",
+            VmBandKind::Data => "Data",
+            VmBandKind::Text => "Text",
+        };
+
+        let band_height = y_end.saturating_sub(y_start);
+        if band_height > 0 && inner.width > 0 && !label.is_empty() {
+            // Choose vertical position: upper middle of the band
+            // For even heights, this chooses the upper of the two middle rows
+            let label_y = y_start + (band_height - 1) / 2;
+
+            // Center horizontally if possible
+            let label_width = label.chars().count() as u16;
+            let label_x = if label_width + 2 <= inner.width {
+                // center horizontally within the band area
+                inner.x + (inner.width - label_width) / 2
+            } else {
+                // if too narrow, align to the left
+                inner.x
+            };
+
+            // Create text style: inherit the background from style, but use readable foreground
+            let mut text_style = style;
+            text_style = text_style
+                .fg(self.theme.fg)
+                .add_modifier(Modifier::BOLD);
+
+            // Draw label character by character
+            for (i, ch) in label.chars().enumerate() {
+                let x = label_x + i as u16;
+                if x >= inner.x + inner.width {
+                    break;
+                }
+                if label_y < buf.area.bottom() && x < buf.area.right() {
+                    let cell = buf.get_mut(x, label_y);
+                    cell.set_symbol(&ch.to_string());
+                    cell.set_style(text_style);
                 }
             }
         }

@@ -29,6 +29,8 @@ pub struct Theme {
     pub vm_heap: Color,
     pub vm_data: Color,
     pub vm_text: Color,
+    pub vm_lib: Color,  // shared libraries/mapped regions
+    pub vm_gap: Color,  // unallocated address space
 
     // Syntax highlighting colors
     pub syntax_keyword: Color,
@@ -69,6 +71,8 @@ pub const THEME_DARK: Theme = Theme {
     vm_heap: Color::Cyan,
     vm_data: Color::Yellow,
     vm_text: Color::Magenta,
+    vm_lib: Color::DarkGray,
+    vm_gap: Color::Rgb(40, 40, 40), // slightly different from panel_bg for unallocated space
 
     syntax_keyword: Color::Rgb(198, 120, 221), // purple-ish
     syntax_type: Color::Rgb(209, 154, 102),    // orange-ish
