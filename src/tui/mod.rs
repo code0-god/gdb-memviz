@@ -282,10 +282,37 @@ fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
         }
     }
 
-    // VmCanvas 포커스 시 추가 키 처리 (좌우, 페이지 업/다운)
+    // VmCanvas 포커스 시 추가 키 처리
     if press_or_repeat && app.focus == PaneId::VmCanvas {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        // 점프 모드일 때는 점프 입력만 처리
+        if app.vm.jump.active {
+            match key.code {
+                KeyCode::Esc => {
+                    app.vm_jump_cancel();
+                }
+                KeyCode::Enter => {
+                    app.vm_jump_confirm();
+                }
+                KeyCode::Backspace => {
+                    app.vm_jump_backspace();
+                }
+                KeyCode::Char(ch) => {
+                    app.vm_jump_push_char(ch);
+                }
+                _ => {
+                    // 점프 모드에서는 다른 키는 무시
+                }
+            }
+            return false;
+        }
+
+        // 점프 모드가 아닐 때의 일반 키 처리
         match (key.code, key.modifiers) {
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                app.vm_jump_start();
+            }
             (KeyCode::Left, KeyModifiers::NONE) => {
                 app.vm_left();
             }

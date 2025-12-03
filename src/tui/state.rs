@@ -165,6 +165,28 @@ pub struct SymbolsViewState {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct VmJumpState {
+    pub active: bool,          // 점프 모드 팝업이 열려 있는지
+    pub input: String,         // 사용자가 입력한 주소 문자열
+    pub error: Option<String>, // 파싱/범위 오류 메시지 (없으면 None)
+}
+
+impl VmJumpState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            input: String::new(),
+            error: None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.input.clear();
+        self.error = None;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VmView {
     pub lines: Vec<String>,
@@ -173,6 +195,7 @@ pub struct VmView {
     pub cursor_addr: Option<u64>,
     pub hex: VmHexView,
     pub sub_focus: VmHexPaneFocus,
+    pub jump: VmJumpState,     // 점프 상태
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +253,7 @@ impl AppState {
                 cursor_addr: None,
                 hex: VmHexView::new(),
                 sub_focus: VmHexPaneFocus::Hex,
+                jump: VmJumpState::new(),
             },
             detail: DetailView {
                 lines: split_lines(DETAIL_PLACEHOLDER),
@@ -760,6 +784,110 @@ impl AppState {
         self.vm.hex.cursor_addr = top + row * bpl + col;
 
         self.debug_assert_vm_invariants();
+    }
+
+    // === VM Jump Mode ===
+
+    pub fn vm_jump_start(&mut self) {
+        self.vm.jump.active = true;
+        self.vm.jump.clear();
+    }
+
+    pub fn vm_jump_cancel(&mut self) {
+        self.vm.jump.active = false;
+        self.vm.jump.clear();
+    }
+
+    pub fn vm_jump_push_char(&mut self, ch: char) {
+        if !self.vm.jump.active {
+            return;
+        }
+        // 16진수 문자와 'x' / 'X'만 허용 (0x 접두사 허용용)
+        if ch.is_ascii_hexdigit() || ch == 'x' || ch == 'X' {
+            self.vm.jump.input.push(ch);
+            self.vm.jump.error = None;
+        }
+    }
+
+    pub fn vm_jump_backspace(&mut self) {
+        if !self.vm.jump.active {
+            return;
+        }
+        self.vm.jump.input.pop();
+        self.vm.jump.error = None;
+    }
+
+    pub fn vm_jump_confirm(&mut self) {
+        if !self.vm.jump.active {
+            return;
+        }
+
+        let raw = self.vm.jump.input.trim();
+        if raw.is_empty() {
+            self.vm.jump.error = Some("empty address".to_string());
+            return;
+        }
+
+        // 0x 접두사 제거
+        let s = raw
+            .strip_prefix("0x")
+            .or_else(|| raw.strip_prefix("0X"))
+            .unwrap_or(raw);
+
+        let addr = match u64::from_str_radix(s, 16) {
+            Ok(v) => v,
+            Err(_) => {
+                self.vm.jump.error = Some("invalid hex address".to_string());
+                return;
+            }
+        };
+
+        // VM 레이아웃 범위 체크
+        if let Some((min_addr, max_addr)) = self.vm.layout.addr_range() {
+            if addr < min_addr || addr >= max_addr {
+                self.vm.jump.error = Some("address outside known VM range".to_string());
+                return;
+            }
+        }
+
+        // hexdump 페이지/커서 이동
+        if self.vm.hex.bytes_per_line == 0 || self.vm.hex.lines_per_page == 0 {
+            // 아직 렌더 전에 jump를 호출한 경우 – 일단 커서만 맞춰두고 종료
+            self.vm.hex.cursor_addr = addr;
+        } else {
+            let bpl = self.vm.hex.bytes_per_line as u64;
+            let lines = self.vm.hex.lines_per_page as u64;
+            let page_size = bpl * lines;
+
+            // 주소를 줄 시작으로 맞춤
+            let line_start = addr / bpl * bpl;
+
+            // 타겟 줄을 화면 중간쯤에 두고 싶으면 offset 줄 만큼 위로 빼기
+            let center_offset_lines = lines / 2;
+            let mut top = line_start.saturating_sub(center_offset_lines * bpl);
+
+            // 최대 주소 기준으로 top을 클램프
+            if let Some((_min_addr, max_addr)) = self.vm.layout.addr_range() {
+                if max_addr > page_size {
+                    let max_top = max_addr - page_size;
+                    if top > max_top {
+                        top = max_top;
+                    }
+                }
+            }
+
+            self.vm.hex.top_addr = top;
+            self.vm.hex.cursor_addr = addr;
+
+            // 실제 페이지 읽기
+            let _ = self.refresh_vm_hex_page();
+        }
+
+        // 서브 포커스는 Hex로 맞춰 둔다
+        self.vm.sub_focus = VmHexPaneFocus::Hex;
+
+        // 점프 모드 종료
+        self.vm.jump.active = false;
     }
 }
 

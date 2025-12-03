@@ -29,6 +29,7 @@ pub struct Theme {
     pub source_panel_border: Color, // source panel border
     pub vm_panel_border: Color,     // vm panel border
     pub detail_panel_border: Color, // detail panel border
+    pub jump_panel_border: Color, // jump mode popup border
 
     // VM region colors
     pub vm_stack: Color,
@@ -78,6 +79,7 @@ pub const THEME_DARK: Theme = Theme {
     source_panel_border: Color::Rgb(80, 80, 100),
     vm_panel_border: Color::Rgb(80, 80, 100),
     detail_panel_border: Color::Rgb(240, 200, 20),
+    jump_panel_border: Color::Cyan, 
 
     vm_stack: Color::Green,
     vm_heap: Color::Cyan,

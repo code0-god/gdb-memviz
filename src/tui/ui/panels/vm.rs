@@ -236,4 +236,51 @@ pub fn render_vm_panel(
     };
     let minimap = VmMinimap::new(&app.vm.layout, minimap_cursor, theme, minimap_border);
     f.render_widget(minimap, vm_map_area);
+
+    // 7) Jump mode popup (if active)
+    if app.vm.jump.active {
+        let mut popup_width: u16 = 40;
+        let mut popup_height: u16 = if app.vm.jump.error.is_some() { 4 } else { 3 };
+
+         // hex 패널 크기를 넘지 않도록 클램프
+        if popup_width > hex_area.width {
+            popup_width = hex_area.width;
+        }
+        if popup_height > hex_area.height {
+            popup_height = hex_area.height;
+        }
+
+        // hex 패널(테두리 포함) 전체의 우측 하단에 붙이기
+        let popup_x = hex_area.x + hex_area.width.saturating_sub(popup_width);
+        let popup_y = hex_area.y + hex_area.height.saturating_sub(popup_height);
+        let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        let block = Block::default()
+            .title(" Jump to address ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.jump_panel_border))
+            .style(Style::default().bg(theme.panel_bg));
+
+        let inner = block.inner(popup_area);
+
+        // 첫 줄: 프롬프트 + 입력
+        let prompt = format!("addr: {}", app.vm.jump.input);
+
+        let mut lines = vec![Line::from(Span::raw(prompt))];
+
+        // 둘째 줄에 오류 메시지 표시 (있다면)
+        if let Some(err) = &app.vm.jump.error {
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(theme.error),
+            )));
+        }
+
+        let para = Paragraph::new(lines).style(Style::default().fg(theme.fg).bg(theme.panel_bg));
+
+        // 기존 화면 위에 덮어쓰기
+        f.render_widget(Clear, popup_area);
+        f.render_widget(block, popup_area);
+        f.render_widget(para, inner);
+    }
 }
