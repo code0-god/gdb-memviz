@@ -170,6 +170,32 @@ fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
     // Get the key representation
     let key_input = Key::from_event(&key);
 
+    // Jump 모드에서는 허용된 입력만 처리하고 나머지는 무시한다.
+    if app.vm.jump.active {
+        if !press_or_repeat {
+            return false;
+        }
+
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                app.vm_jump_cancel();
+            }
+            KeyCode::Enter => {
+                app.vm_jump_confirm();
+            }
+            KeyCode::Backspace => {
+                app.vm_jump_backspace();
+            }
+            KeyCode::Char(ch) if ch.is_ascii_hexdigit() || ch == 'x' || ch == 'X' => {
+                app.vm_jump_push_char(ch);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // Look up action in keymap based on current context
     if let Some(action) = keymap.get_action(&key_input, app.focus) {
         // Execute the action
@@ -282,6 +308,30 @@ fn handle_key(key: KeyEvent, app: &mut AppState, keymap: &KeyMap) -> bool {
         }
     }
 
+    // VmCanvas 포커스 시 추가 키 처리
+    if press_or_repeat && app.focus == PaneId::VmCanvas {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                app.vm_jump_start();
+            }
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                app.vm_left();
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                app.vm_right();
+            }
+            (KeyCode::Up, KeyModifiers::CONTROL) => {
+                app.vm_page_up();
+            }
+            (KeyCode::Down, KeyModifiers::CONTROL) => {
+                app.vm_page_down();
+            }
+            _ => {}
+        }
+    }
+
     false
 }
 
@@ -317,8 +367,16 @@ fn scroll_focus(app: &mut AppState, delta: i16) {
             app.symbols.selected_index = new_index;
         }
         PaneId::VmCanvas => {
-            let max = max_scroll(&app.vm.lines);
-            app.vm.scroll_y = apply_scroll(app.vm.scroll_y, delta, max);
+            // VM hexdump 스크롤 (위/아래)
+            if delta < 0 {
+                for _ in 0..(-delta) {
+                    app.vm_move_up();
+                }
+            } else {
+                for _ in 0..delta {
+                    app.vm_move_down();
+                }
+            }
         }
         PaneId::Detail => {
             // Detail panel is not rendered in the new layout, but keep for compatibility

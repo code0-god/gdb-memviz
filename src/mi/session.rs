@@ -565,7 +565,7 @@ impl MiSession {
             truncated_from = Some(requested);
             requested = MAX_DUMP_BYTES;
         }
-        let (addr, bytes) = self.read_memory_bytes(&addr_str, requested)?;
+        let (addr, bytes) = self.read_memory_bytes_internal(&addr_str, requested)?;
         // If endian is still unknown, use arch hint or default little.
         if matches!(self.endian, Endian::Unknown) {
             if let Some(arch) = &self.arch {
@@ -596,8 +596,17 @@ impl MiSession {
         self.ensure_word_size();
         self.ensure_endian();
         let size = size_override.unwrap_or(self.word_size).max(1);
-        let (_, bytes) = self.read_memory_bytes(&format!("0x{:x}", address), size)?;
+        let (_, bytes) = self.read_memory_bytes_internal(&format!("0x{:x}", address), size)?;
         Ok(bytes_to_u64(&bytes, self.endian))
+    }
+
+    /// gdb-MI `-data-read-memory-bytes` 를 사용해 연속된 메모리를 읽는다.
+    /// addr: 시작 주소, len: 읽을 바이트 수
+    pub fn read_memory_bytes(&mut self, addr: u64, len: usize) -> anyhow::Result<Vec<u8>> {
+        let addr_str = format!("0x{:x}", addr);
+        let (_addr, bytes) = self.read_memory_bytes_internal(&addr_str, len)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(bytes)
     }
 
     /// Fetch type name using -var-create/-var-delete. Returns None on failure.
@@ -613,8 +622,8 @@ impl MiSession {
         ty
     }
 
-    /// Read memory bytes from an address using `-data-read-memory-bytes`.
-    fn read_memory_bytes(&mut self, address: &str, bytes: usize) -> Result<(String, Vec<u8>)> {
+    /// Read memory bytes from an address using `-data-read-memory-bytes` (internal helper).
+    fn read_memory_bytes_internal(&mut self, address: &str, bytes: usize) -> Result<(String, Vec<u8>)> {
         let cmd = format!("-data-read-memory-bytes {} {}", address, bytes);
         let resp = self.exec_command(&cmd)?;
         if let MiStatus::Error(msg) = resp.status.clone() {

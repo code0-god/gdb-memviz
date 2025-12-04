@@ -23,12 +23,21 @@ pub struct Theme {
     pub panel_bg: Color,     // panel background (floating card effect)
     pub panel_shadow: Color, // panel shadow color
     pub separator: Color,    // separator line color
+    pub source_panel_bg: Color, // source panel background
+    pub vm_panel_bg: Color,     // vm panel background
+    pub detail_panel_bg: Color, // detail panel background
+    pub source_panel_border: Color, // source panel border
+    pub vm_panel_border: Color,     // vm panel border
+    pub detail_panel_border: Color, // detail panel border
+    pub jump_panel_border: Color, // jump mode popup border
 
     // VM region colors
     pub vm_stack: Color,
     pub vm_heap: Color,
     pub vm_data: Color,
     pub vm_text: Color,
+    pub vm_lib: Color,  // shared libraries/mapped regions
+    pub vm_gap: Color,  // unallocated address space
 
     // Syntax highlighting colors
     pub syntax_keyword: Color,
@@ -64,11 +73,20 @@ pub const THEME_DARK: Theme = Theme {
     panel_bg: Color::Rgb(18, 21, 32),
     panel_shadow: Color::Rgb(8, 10, 16),
     separator: Color::Rgb(60, 90, 120),
+    source_panel_bg: Color::Rgb(18, 21, 32),
+    vm_panel_bg: Color::Rgb(18, 21, 32),
+    detail_panel_bg: Color::Rgb(18, 21, 32),
+    source_panel_border: Color::Rgb(80, 80, 100),
+    vm_panel_border: Color::Rgb(80, 80, 100),
+    detail_panel_border: Color::Rgb(240, 200, 20),
+    jump_panel_border: Color::Cyan, 
 
     vm_stack: Color::Green,
     vm_heap: Color::Cyan,
     vm_data: Color::Yellow,
     vm_text: Color::Magenta,
+    vm_lib: Color::DarkGray,
+    vm_gap: Color::Rgb(40, 40, 40), // slightly different from panel_bg for unallocated space
 
     syntax_keyword: Color::Rgb(198, 120, 221), // purple-ish
     syntax_type: Color::Rgb(209, 154, 102),    // orange-ish

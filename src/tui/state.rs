@@ -3,6 +3,7 @@ use crate::mi::{GlobalVar, LocalVar, MiSession, Result, StoppedLocation};
 use crate::symbols::{GlobalVarWithValue, SymbolIndex, SymbolIndexMode};
 use crate::tui::theme::Theme;
 use crate::types::{normalize_pointer_type, normalize_type_name};
+use crate::vm::{VmHexPaneFocus, VmHexView, VmLayout};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -129,6 +130,7 @@ pub struct SourceViewState {
     pub lines: Vec<String>,
     pub current_line: Option<u32>,
     pub scroll_top: u32,
+    pub view_height: u16,
 }
 
 impl SourceViewState {
@@ -138,6 +140,7 @@ impl SourceViewState {
             lines: Vec::new(),
             current_line: None,
             scroll_top: 0,
+            view_height: 0,
         }
     }
 }
@@ -164,10 +167,37 @@ pub struct SymbolsViewState {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct VmJumpState {
+    pub active: bool,          // 점프 모드 팝업이 열려 있는지
+    pub input: String,         // 사용자가 입력한 주소 문자열
+    pub error: Option<String>, // 파싱/범위 오류 메시지 (없으면 None)
+}
+
+impl VmJumpState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            input: String::new(),
+            error: None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.input.clear();
+        self.error = None;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VmView {
     pub lines: Vec<String>,
     pub scroll_y: u16,
+    pub layout: VmLayout,
+    pub cursor_addr: Option<u64>,
+    pub hex: VmHexView,
+    pub sub_focus: VmHexPaneFocus,
+    pub jump: VmJumpState,     // 점프 상태
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +251,11 @@ impl AppState {
             vm: VmView {
                 lines: split_lines(VM_LAYOUT_PLACEHOLDER),
                 scroll_y: 0,
+                layout: VmLayout::default(),
+                cursor_addr: None,
+                hex: VmHexView::new(),
+                sub_focus: VmHexPaneFocus::Hex,
+                jump: VmJumpState::new(),
             },
             detail: DetailView {
                 lines: split_lines(DETAIL_PLACEHOLDER),
@@ -271,6 +306,42 @@ impl AppState {
         self.symbols_popup_width = v as u16;
     }
 
+    /// Refresh the VM layout (used by the minimap) from the current inferior process
+    pub fn refresh_vm_layout_from_session(&mut self) {
+        // Try to get PID from gdb
+        let pid = match self.debugger.inferior_pid() {
+            Ok(pid) => pid,
+            Err(err) => {
+                // Log error but don't clear the layout - keep showing old data
+                crate::logger::log_debug(&format!(
+                    "[vm] failed to get inferior pid for VM layout: {:?}",
+                    err
+                ));
+                return;
+            }
+        };
+
+        // Try to read /proc/<pid>/maps
+        match self.vm.layout.refresh_from_pid(pid) {
+            Ok(()) => {
+                if self.verbose {
+                    crate::logger::log_debug(&format!(
+                        "[vm] refreshed VM layout from pid {}: {} regions",
+                        pid,
+                        self.vm.layout.regions.len()
+                    ));
+                }
+            }
+            Err(err) => {
+                crate::logger::log_debug(&format!(
+                    "[vm] failed to read /proc/{}/maps for VM layout: {:?}",
+                    pid, err
+                ));
+                // Keep old layout on error
+            }
+        }
+    }
+
     /// Refresh TUI state after gdb stops (at breakpoint, step, etc.)
     pub fn refresh_after_stop(&mut self, stopped: Option<&StoppedLocation>) -> Result<()> {
         let t0 = Instant::now();
@@ -293,13 +364,16 @@ impl AppState {
         let t2 = Instant::now();
         self.update_symbols(&frame)?;
         let t3 = Instant::now();
+        self.refresh_vm_layout_from_session();
+        let t4 = Instant::now();
 
         if self.verbose {
             crate::logger::log_debug(&format!(
-                "[tui] refresh_after_stop: frame={}ms, source={}ms, symbols={}ms",
+                "[tui] refresh_after_stop: frame={}ms, source={}ms, symbols={}ms, vm={}ms",
                 (t1 - t0).as_millis(),
                 (t2 - t1).as_millis(),
-                (t3 - t2).as_millis()
+                (t3 - t2).as_millis(),
+                (t4 - t3).as_millis()
             ));
         }
 
@@ -423,7 +497,7 @@ impl AppState {
         // 따라서 ▶ 표시 줄은 아직 실행 전이며, locals/globals는 직전까지 실행된 상태를 보여준다.
         // 한 줄 늦어 보이는 것은 gdb 표준 semantics를 그대로 따른 결과다.
         self.source.current_line = Some(line);
-        self.adjust_source_scroll(line);
+        self.adjust_source_scroll(line, self.source.view_height);
 
         Ok(())
     }
@@ -455,12 +529,393 @@ impl AppState {
         }
     }
 
-    fn adjust_source_scroll(&mut self, current_line: u32) {
+    pub(crate) fn adjust_source_scroll(&mut self, current_line: u32, view_height: u16) {
+        if view_height == 0 {
+            return;
+        }
+
         // current_line is 1-based, scroll_top is 0-based
         let idx = current_line.saturating_sub(1);
+        let view_height_u32 = view_height as u32;
 
-        // Keep the current line at the top of the view after a stop.
-        self.source.scroll_top = idx;
+        let mut new_top = self.source.scroll_top;
+        let bottom = new_top.saturating_add(view_height_u32.saturating_sub(1));
+
+        if idx < new_top {
+            new_top = idx;
+        } else if idx > bottom {
+            new_top = idx.saturating_sub(view_height_u32.saturating_sub(1));
+        }
+
+        let max_top = {
+            let max_raw = self.source.lines.len() as i64 - view_height as i64;
+            if max_raw < 0 {
+                0
+            } else {
+                max_raw as u32
+            }
+        };
+
+        if new_top > max_top {
+            new_top = max_top;
+        }
+
+        self.source.scroll_top = new_top;
+    }
+
+    /// 현재 VmHexView 설정(bytes_per_line, lines_per_page, top_addr)에 맞춰
+    /// gdb를 통해 한 페이지 분량의 메모리를 읽어와 vm.hex.buf / valid_len 을 채운다.
+    pub fn refresh_vm_hex_page(&mut self) -> anyhow::Result<()> {
+        // lines_per_page 가 0 이면 아직 렌더링에서 설정되지 않은 상태이므로
+        // 일단 아무 것도 하지 않고 Ok(()) 반환
+        let lines = self.vm.hex.lines_per_page;
+        if lines == 0 {
+            return Ok(());
+        }
+
+        let bpl = self.vm.hex.bytes_per_line.max(1);
+        let page_size = (lines as usize) * (bpl as usize);
+
+        let addr = self.vm.hex.top_addr;
+
+        // 이전 내용은 지워두고 시작
+        self.vm.hex.buf.clear();
+        self.vm.hex.valid_len = 0;
+
+        crate::logger::log_debug(&format!(
+            "[vm] refresh_vm_hex_page: addr=0x{:x}, size={}",
+            addr, page_size
+        ));
+
+        match self.debugger.read_memory_bytes(addr, page_size) {
+            Ok(bytes) => {
+                self.vm.hex.buf = bytes;
+                self.vm.hex.valid_len = self.vm.hex.buf.len();
+            }
+            Err(e) => {
+                crate::logger::log_debug(&format!(
+                    "[vm] memory read failed at 0x{:x}: {:?}",
+                    addr, e
+                ));
+                // 실패해도 페이지 크기만큼 0으로 채워서 화면이 “바뀌었다”는 걸 보장
+                self.vm.hex.buf = vec![0u8; page_size];
+                self.vm.hex.valid_len = 0;
+            }
+        }
+
+        // 어떤 경우든 "이 주소/라인 수로 로드했다"는 사실은 기록해 둔다.
+        self.vm.hex.last_loaded_top_addr = self.vm.hex.top_addr;
+        self.vm.hex.last_loaded_lines_per_page = self.vm.hex.lines_per_page;
+
+        Ok(())
+    }
+
+    // === VM hexdump navigation ===
+
+    fn vm_bpl(&self) -> u64 {
+        self.vm.hex.bytes_per_line as u64
+    }
+
+    fn vm_page_size(&self) -> u64 {
+        self.vm_bpl() * self.vm.hex.lines_per_page as u64
+    }
+
+    fn debug_assert_vm_invariants(&self) {
+        let bpl = self.vm_bpl();
+        let page_size = self.vm_page_size();
+
+        debug_assert!(self.vm.hex.lines_per_page > 0);
+        debug_assert!(bpl > 0);
+
+        let start = self.vm.hex.top_addr;
+        let end = start + page_size;
+
+        debug_assert!(
+            self.vm.hex.cursor_addr >= start && self.vm.hex.cursor_addr < end
+        );
+    }
+
+    pub fn vm_move_up(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        if row > 0 {
+            row -= 1;
+        } else {
+            top = top.saturating_sub(bpl);
+            row = 0;
+        }
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_move_down(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        if row + 1 < rows {
+            row += 1;
+        } else {
+            top = top.saturating_add(bpl);
+            row = rows.saturating_sub(1);
+        }
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    fn vm_move_byte(&mut self, dir: i64) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+
+        let mut top = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(top);
+        let mut row = (offset / bpl).min(rows.saturating_sub(1));
+        let mut col = offset % bpl;
+
+        let mut new_row = row as i128;
+        let mut new_col = col as i128 + dir as i128;
+        let bpl_i = bpl as i128;
+
+        while new_col < 0 {
+            new_col += bpl_i;
+            new_row -= 1;
+        }
+        while new_col >= bpl_i {
+            new_col -= bpl_i;
+            new_row += 1;
+        }
+
+        if new_row < 0 {
+            let delta_rows = (-new_row) as u64;
+            top = top.saturating_sub(delta_rows * bpl);
+            new_row = 0;
+        } else if new_row >= rows as i128 {
+            let delta_rows = (new_row as u64).saturating_sub(rows.saturating_sub(1));
+            top = top.saturating_add(delta_rows * bpl);
+            new_row = rows.saturating_sub(1) as i128;
+        }
+
+        row = new_row as u64;
+        col = new_col as u64;
+
+        self.vm.hex.top_addr = top;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_left(&mut self) {
+        match self.vm.sub_focus {
+            VmHexPaneFocus::Hex => {
+                if let Some((_row, col)) = self.vm.hex.cursor_row_col() {
+                    if col > 0 {
+                        self.vm_move_byte(-1);
+                    } else {
+                        // Hex 첫 컬럼에서 ← → Address 패널로 포커스만 이동
+                        self.vm.sub_focus = VmHexPaneFocus::Address;
+                    }
+                }
+            }
+            VmHexPaneFocus::Address => {
+                // 왼쪽으로 더 갈 패널이 없으므로 아무 것도 하지 않음
+            }
+        }
+    }
+
+    pub fn vm_right(&mut self) {
+        match self.vm.sub_focus {
+            VmHexPaneFocus::Hex => {
+                // 바이트 하나 오른쪽으로 이동 (페이지 넘으면 vm_move_byte가 처리)
+                self.vm_move_byte(1);
+            }
+            VmHexPaneFocus::Address => {
+                // Address → Hex 첫 컬럼으로 포커스 이동
+                self.vm.sub_focus = VmHexPaneFocus::Hex;
+                if let Some((row, _col)) = self.vm.hex.cursor_row_col() {
+                    self.vm.hex.cursor_addr = self.vm.hex.addr_from_row_col(row, 0);
+                }
+            }
+        }
+    }
+
+    pub fn vm_page_up(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+        let page_size = self.vm_page_size();
+        if page_size == 0 {
+            return;
+        }
+
+        let start = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(start);
+        let row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        self.vm.hex.top_addr = self.vm.hex.top_addr.saturating_sub(page_size);
+        let top = self.vm.hex.top_addr;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    pub fn vm_page_down(&mut self) {
+        if self.vm.hex.lines_per_page == 0 || self.vm.hex.bytes_per_line == 0 {
+            return;
+        }
+        let bpl = self.vm_bpl();
+        let rows = self.vm.hex.lines_per_page as u64;
+        let page_size = self.vm_page_size();
+        if page_size == 0 {
+            return;
+        }
+
+        let start = self.vm.hex.top_addr;
+        let cursor = self.vm.hex.cursor_addr;
+        let offset = cursor.saturating_sub(start);
+        let row = (offset / bpl).min(rows.saturating_sub(1));
+        let col = offset % bpl;
+
+        self.vm.hex.top_addr = self.vm.hex.top_addr.saturating_add(page_size);
+        let top = self.vm.hex.top_addr;
+        self.vm.hex.cursor_addr = top + row * bpl + col;
+
+        self.debug_assert_vm_invariants();
+    }
+
+    // === VM Jump Mode ===
+
+    pub fn vm_jump_start(&mut self) {
+        self.vm.jump.active = true;
+        self.vm.jump.clear();
+    }
+
+    pub fn vm_jump_cancel(&mut self) {
+        self.vm.jump.active = false;
+        self.vm.jump.clear();
+    }
+
+    pub fn vm_jump_push_char(&mut self, ch: char) {
+        if !self.vm.jump.active {
+            return;
+        }
+        // 16진수 문자와 'x' / 'X'만 허용 (0x 접두사 허용용)
+        if ch.is_ascii_hexdigit() || ch == 'x' || ch == 'X' {
+            self.vm.jump.input.push(ch);
+            self.vm.jump.error = None;
+        }
+    }
+
+    pub fn vm_jump_backspace(&mut self) {
+        if !self.vm.jump.active {
+            return;
+        }
+        self.vm.jump.input.pop();
+        self.vm.jump.error = None;
+    }
+
+    pub fn vm_jump_confirm(&mut self) {
+        if !self.vm.jump.active {
+            return;
+        }
+
+        let raw = self.vm.jump.input.trim();
+        if raw.is_empty() {
+            self.vm.jump.error = Some("empty address".to_string());
+            return;
+        }
+
+        // 0x 접두사 제거
+        let s = raw
+            .strip_prefix("0x")
+            .or_else(|| raw.strip_prefix("0X"))
+            .unwrap_or(raw);
+
+        let addr = match u64::from_str_radix(s, 16) {
+            Ok(v) => v,
+            Err(_) => {
+                self.vm.jump.error = Some("invalid hex address".to_string());
+                return;
+            }
+        };
+
+        // VM 레이아웃 범위 체크
+        if let Some((min_addr, max_addr)) = self.vm.layout.addr_range() {
+            if addr < min_addr || addr >= max_addr {
+                self.vm.jump.error = Some("address outside known VM range".to_string());
+                return;
+            }
+        }
+
+        // hexdump 페이지/커서 이동
+        if self.vm.hex.bytes_per_line == 0 || self.vm.hex.lines_per_page == 0 {
+            // 아직 렌더 전에 jump를 호출한 경우 – 일단 커서만 맞춰두고 종료
+            self.vm.hex.cursor_addr = addr;
+        } else {
+            let bpl = self.vm.hex.bytes_per_line as u64;
+            let lines = self.vm.hex.lines_per_page as u64;
+            let page_size = bpl * lines;
+
+            // 주소를 줄 시작으로 맞춤
+            let line_start = addr / bpl * bpl;
+
+            // 타겟 줄을 화면 중간쯤에 두고 싶으면 offset 줄 만큼 위로 빼기
+            let center_offset_lines = lines / 2;
+            let mut top = line_start.saturating_sub(center_offset_lines * bpl);
+
+            // 최대 주소 기준으로 top을 클램프
+            if let Some((_min_addr, max_addr)) = self.vm.layout.addr_range() {
+                if max_addr > page_size {
+                    let max_top = max_addr - page_size;
+                    if top > max_top {
+                        top = max_top;
+                    }
+                }
+            }
+
+            self.vm.hex.top_addr = top;
+            self.vm.hex.cursor_addr = addr;
+
+            // 실제 페이지 읽기
+            let _ = self.refresh_vm_hex_page();
+        }
+
+        // 서브 포커스는 Hex로 맞춰 둔다
+        self.vm.sub_focus = VmHexPaneFocus::Hex;
+
+        // 점프 모드 종료
+        self.vm.jump.active = false;
     }
 }
 
