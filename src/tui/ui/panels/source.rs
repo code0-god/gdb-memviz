@@ -3,9 +3,19 @@ use crate::tui::{
     state::SourceViewState,
     theme::{self, Theme},
 };
-use ratatui::{prelude::*, text::{Line, Span}, widgets::{Clear, Paragraph}};
+use ratatui::{prelude::*, text::{Line, Span}, widgets::{Block, Clear, Paragraph}};
 
 use super::super::helpers::pad_or_truncate_line;
+
+pub fn source_panel_block(focused: bool, theme: &Theme) -> Block<'static> {
+    let block = theme::panel_block("Source", focused, theme);
+    let border_color = if focused {
+        theme.accent
+    } else {
+        theme.source_panel_border
+    };
+    block.border_style(Style::default().fg(border_color))
+}
 
 pub fn render_source_panel(
     f: &mut Frame,
@@ -18,16 +28,9 @@ pub fn render_source_panel(
     f.render_widget(Clear, area);
 
     // Render panel block with simple "Source" title
-    let mut block = theme::panel_block("Source", focused, theme);
-    // 패널 윤곽선 색상 독립 설정
-    let border_color = if focused {
-        theme.accent
-    } else {
-        theme.source_panel_border
-    };
-    block = block.border_style(Style::default().fg(border_color));
-    f.render_widget(block.clone(), area);
+    let block = source_panel_block(focused, theme);
     let inner = block.inner(area);
+    f.render_widget(block, area);
 
     // Early exit if not enough space
     if inner.height < 2 {

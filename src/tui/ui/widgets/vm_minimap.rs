@@ -123,6 +123,10 @@ impl<'a> Widget for VmMinimap<'a> {
         let mut remaining_rows = h;
 
         for (idx, (kind, units)) in band_units.iter().enumerate() {
+            if remaining_rows == 0 {
+                break;
+            }
+
             // Get the band or create a placeholder with no span
             let placeholder = VmBand {
                 kind: *kind,
@@ -130,23 +134,16 @@ impl<'a> Widget for VmMinimap<'a> {
             };
             let band = band_map.get(kind).copied().unwrap_or(&placeholder);
 
+            let is_last = idx == band_units.len() - 1;
+
             // Compute this band's height in rows based on units
-            let target = ((*units as u32) * (h as u32) / (total_units as u32)) as u16;
-            let mut band_h = target.max(1);
-
-            // Clamp to remaining rows
-            if band_h > remaining_rows {
-                band_h = remaining_rows;
-            }
-
-            // For the last band, only use remaining rows if it's within 1 of target
-            // This prevents the last band from expanding too much
-            if idx == band_units.len() - 1 && remaining_rows > 0 {
-                // If there's a small rounding error (1-2 rows), give it to the last band
-                if remaining_rows <= 2 || remaining_rows.abs_diff(target) <= 1 {
-                    band_h = remaining_rows;
-                }
-            }
+            let band_h = if is_last {
+                // Use all remaining rows on the last band to avoid empty space.
+                remaining_rows
+            } else {
+                let target = ((*units as u32) * (h as u32) / (total_units as u32)) as u16;
+                target.max(1).min(remaining_rows)
+            };
 
             let y0 = inner.y + used_rows;
             let y1 = y0.saturating_add(band_h).min(inner.y + h);
@@ -163,9 +160,6 @@ impl<'a> Widget for VmMinimap<'a> {
 
             used_rows += band_h;
             remaining_rows = h.saturating_sub(used_rows);
-            if remaining_rows == 0 {
-                break;
-            }
         }
 
         // Draw address range labels outside the minimap bands

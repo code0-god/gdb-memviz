@@ -130,6 +130,7 @@ pub struct SourceViewState {
     pub lines: Vec<String>,
     pub current_line: Option<u32>,
     pub scroll_top: u32,
+    pub view_height: u16,
 }
 
 impl SourceViewState {
@@ -139,6 +140,7 @@ impl SourceViewState {
             lines: Vec::new(),
             current_line: None,
             scroll_top: 0,
+            view_height: 0,
         }
     }
 }
@@ -495,7 +497,7 @@ impl AppState {
         // 따라서 ▶ 표시 줄은 아직 실행 전이며, locals/globals는 직전까지 실행된 상태를 보여준다.
         // 한 줄 늦어 보이는 것은 gdb 표준 semantics를 그대로 따른 결과다.
         self.source.current_line = Some(line);
-        self.adjust_source_scroll(line);
+        self.adjust_source_scroll(line, self.source.view_height);
 
         Ok(())
     }
@@ -527,12 +529,38 @@ impl AppState {
         }
     }
 
-    fn adjust_source_scroll(&mut self, current_line: u32) {
+    pub(crate) fn adjust_source_scroll(&mut self, current_line: u32, view_height: u16) {
+        if view_height == 0 {
+            return;
+        }
+
         // current_line is 1-based, scroll_top is 0-based
         let idx = current_line.saturating_sub(1);
+        let view_height_u32 = view_height as u32;
 
-        // Keep the current line at the top of the view after a stop.
-        self.source.scroll_top = idx;
+        let mut new_top = self.source.scroll_top;
+        let bottom = new_top.saturating_add(view_height_u32.saturating_sub(1));
+
+        if idx < new_top {
+            new_top = idx;
+        } else if idx > bottom {
+            new_top = idx.saturating_sub(view_height_u32.saturating_sub(1));
+        }
+
+        let max_top = {
+            let max_raw = self.source.lines.len() as i64 - view_height as i64;
+            if max_raw < 0 {
+                0
+            } else {
+                max_raw as u32
+            }
+        };
+
+        if new_top > max_top {
+            new_top = max_top;
+        }
+
+        self.source.scroll_top = new_top;
     }
 
     /// 현재 VmHexView 설정(bytes_per_line, lines_per_page, top_addr)에 맞춰

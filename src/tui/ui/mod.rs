@@ -6,7 +6,7 @@ pub mod panels;
 pub mod widgets;
 
 use helpers::{inset, symbols_popup_rect};
-use panels::{source::render_source_panel, symbols::render_symbols_panel, vm::render_vm_panel};
+use panels::{source::{render_source_panel, source_panel_block}, symbols::render_symbols_panel, vm::render_vm_panel};
 use widgets::{cmdline::render_cmdline, header::render_header};
 
 pub fn draw(f: &mut Frame, app: &mut AppState) {
@@ -95,6 +95,16 @@ pub fn draw(f: &mut Frame, app: &mut AppState) {
 
     let source_area = main_chunks[0];
     let vm_area = main_chunks[1];
+
+    let source_view_height = {
+        let block = source_panel_block(app.focus == PaneId::Source, theme);
+        let inner = block.inner(source_area);
+        inner.height.saturating_sub(1)
+    };
+    app.source.view_height = source_view_height;
+    if let Some(line) = app.source.current_line {
+        app.adjust_source_scroll(line, source_view_height);
+    }
 
     // Render Source and VM panels
     render_source_panel(
